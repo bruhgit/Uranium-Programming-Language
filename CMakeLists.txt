@@ -33,13 +33,41 @@ set(SOURCES
     src/db_native.cpp
     src/thread_native.cpp
     src/sqlite3.c
-    resources.rc
 )
+
+if(WIN32)
+    list(APPEND SOURCES resources.rc)
+endif()
 
 add_executable(uranium ${SOURCES})
 
+find_package(Threads REQUIRED)
+target_link_libraries(uranium PRIVATE Threads::Threads)
+
 if(WIN32)
     target_link_libraries(uranium PRIVATE Ole32 Shell32 Comdlg32 Comctl32 Winhttp Ws2_32 Advapi32)
+endif()
+
+if(APPLE)
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        target_link_libraries(uranium PRIVATE CURL::libcurl)
+        target_compile_definitions(uranium PRIVATE URANIUM_HAS_CURL)
+    endif()
+endif()
+
+if(UNIX AND NOT APPLE)
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        target_link_libraries(uranium PRIVATE CURL::libcurl)
+        target_compile_definitions(uranium PRIVATE URANIUM_HAS_CURL)
+    endif()
+
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        target_link_libraries(uranium PRIVATE OpenSSL::Crypto)
+        target_compile_definitions(uranium PRIVATE URANIUM_HAS_OPENSSL)
+    endif()
 endif()
 
 if(URANIUM_DEBUG_TRACE)
