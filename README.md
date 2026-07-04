@@ -15,4 +15,4 @@
    cmake .. && cmake --build . --config Release
 ```
 ------------
-Uranium now works almost seamlessly with Linux and macOS (Linux and macOS dependencies are under testing).
+Uranium now works almost seamlessly with Linux and macOS
