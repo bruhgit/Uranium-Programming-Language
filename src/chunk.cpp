@@ -233,6 +233,8 @@ int disassembleInstructionToStream(std::ostream& stream, Chunk* chunk, int offse
             return simpleInstruction(stream, "OP_THROW", offset);
         case OP_AWAIT:
             return simpleInstruction(stream, "OP_AWAIT", offset);
+        case OP_BREAKPOINT:
+            return simpleInstruction(stream, "OP_BREAKPOINT", offset);
         case OP_GET_INDEX:
             return simpleInstruction(stream, "OP_GET_INDEX", offset);
         case OP_SET_INDEX:
@@ -261,6 +263,20 @@ int disassembleInstructionToStream(std::ostream& stream, Chunk* chunk, int offse
             return simpleInstruction(stream, "OP_MULTIPLY", offset);
         case OP_DIVIDE:
             return simpleInstruction(stream, "OP_DIVIDE", offset);
+        case OP_MODULO:
+            return simpleInstruction(stream, "OP_MODULO", offset);
+        case OP_BITAND:
+            return simpleInstruction(stream, "OP_BITAND", offset);
+        case OP_BITOR:
+            return simpleInstruction(stream, "OP_BITOR", offset);
+        case OP_BITXOR:
+            return simpleInstruction(stream, "OP_BITXOR", offset);
+        case OP_BITNOT:
+            return simpleInstruction(stream, "OP_BITNOT", offset);
+        case OP_SHL:
+            return simpleInstruction(stream, "OP_SHL", offset);
+        case OP_SHR:
+            return simpleInstruction(stream, "OP_SHR", offset);
         case OP_NOT:
             return simpleInstruction(stream, "OP_NOT", offset);
         case OP_EQUAL:

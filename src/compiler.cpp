@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cmath>
 
 enum FunctionType {
     TYPE_SCRIPT,
@@ -158,6 +159,8 @@ static std::unordered_map<std::string, FunctionPtr> declaredFunctions;
 static FunctionPtr lastResolvedCallable = nullptr;
 static void error(const char* message);
 
+static std::string currentCompileFilename = "script.ur";
+
 static std::string lastEmittedType = "Any";
 
 static void setType(const std::string& type) {
@@ -195,23 +198,41 @@ static Chunk* currentChunk() {
     return &current->function->chunk;
 }
 
+void (*g_compileErrorCallback)(const std::string& message, int line, int column, int length) = nullptr;
+
 static void errorAt(const Token& token, const char* message) {
     if (parser.panicMode) {
         return;
     }
 
     parser.panicMode = true;
-    std::cerr << "[line " << token.line << "] Error";
-
-    if (token.type == TOKEN_EOF) {
-        std::cerr << " at end";
-    } else if (token.type != TOKEN_ERROR) {
-        std::cerr << " at '";
-        std::cerr.write(token.start, token.length);
-        std::cerr << "'";
+    
+    if (g_compileErrorCallback != nullptr) {
+        g_compileErrorCallback(message, token.line, token.column, token.length);
     }
 
-    std::cerr << ": " << message << std::endl;
+    std::cerr << "\033[1;31merror:\033[0m " << message << "\n";
+    std::cerr << "  --> " << currentCompileFilename << ":" << token.line << ":" << token.column << "\n";
+
+    std::string sourceLine = getSourceLine(token.line);
+    if (!sourceLine.empty()) {
+        std::cerr << "   |\n";
+        std::cerr << " " << token.line << " | " << sourceLine << "\n";
+        std::cerr << "   | ";
+        for (int i = 1; i < token.column; ++i) {
+            std::cerr << " ";
+        }
+        int len = token.length;
+        if (len <= 0) len = 1;
+        std::cerr << "\033[1;32m";
+        for (int i = 0; i < len; ++i) {
+            std::cerr << "^";
+        }
+        std::cerr << "\033[0m\n";
+    } else {
+        std::cerr << "   |\n";
+    }
+    std::cerr << std::endl;
     parser.hadError = true;
 }
 
@@ -876,7 +897,7 @@ static int addUpvalue(Compiler* compiler, uint8_t index, bool isLocal, bool isCo
         return 0;
     }
 
-    compiler->upvalues.push_back({index, isLocal, isConst});
+    compiler->upvalues.push_back({index, isLocal, isConst, {}});
     compiler->function->upvalueCount = static_cast<int>(compiler->upvalues.size());
     return static_cast<int>(compiler->upvalues.size() - 1);
 }
@@ -1224,7 +1245,11 @@ static void emitLiteralTokenValue(const Token& token) {
             return;
         case TOKEN_NUMBER: {
             std::string lexeme(token.start, token.length);
-            emitConstant(Value::numberValue(std::strtod(lexeme.c_str(), nullptr)));
+            if (lexeme.find('.') == std::string::npos && lexeme.find('e') == std::string::npos && lexeme.find('E') == std::string::npos) {
+                emitConstant(Value::intValue(static_cast<int64_t>(std::strtoll(lexeme.c_str(), nullptr, 10))));
+            } else {
+                emitConstant(Value::numberValue(std::strtod(lexeme.c_str(), nullptr)));
+            }
             return;
         }
         case TOKEN_STRING: {
@@ -1745,6 +1770,11 @@ static void call(bool canAssign) {
     }
 }
 
+static void bitwiseOr(bool canAssign);
+static void bitwiseXor(bool canAssign);
+static void bitwiseAnd(bool canAssign);
+static void shift(bool canAssign);
+
 static void unary(bool canAssign) {
     if (match(TOKEN_AWAIT)) {
         unary(false);
@@ -1758,6 +1788,14 @@ static void unary(bool canAssign) {
         unary(false);
         emitByte(OP_NOT);
         setType("Bool");
+        clearResolvedCallable();
+        return;
+    }
+
+    if (match(TOKEN_TILDE)) {
+        unary(false);
+        emitByte(OP_BITNOT);
+        setType("Number");
         clearResolvedCallable();
         return;
     }
@@ -1780,22 +1818,24 @@ static void unary(bool canAssign) {
 static void factor(bool canAssign) {
     unary(canAssign);
 
-    while (match(TOKEN_STAR) || match(TOKEN_SLASH)) {
+    while (match(TOKEN_STAR) || match(TOKEN_SLASH) || match(TOKEN_PERCENT)) {
         TokenType op = parser.previous.type;
         std::string leftType = lastEmittedType;
         unary(false);
         std::string rightType = lastEmittedType;
         if (isConcreteTypeAnnotation(leftType) && isConcreteTypeAnnotation(rightType)) {
             reportTypeMismatch("Number", leftType,
-                               op == TOKEN_STAR ? "operator '*'" : "operator '/'");
+                               op == TOKEN_STAR ? "operator '*'" : (op == TOKEN_SLASH ? "operator '/'" : "operator '%'"));
             reportTypeMismatch("Number", rightType,
-                               op == TOKEN_STAR ? "operator '*'" : "operator '/'");
+                               op == TOKEN_STAR ? "operator '*'" : (op == TOKEN_SLASH ? "operator '/'" : "operator '%'"));
         }
 
         if (op == TOKEN_STAR) {
             emitByte(OP_MULTIPLY);
-        } else {
+        } else if (op == TOKEN_SLASH) {
             emitByte(OP_DIVIDE);
+        } else {
+            emitByte(OP_MODULO);
         }
         setType("Number");
         clearResolvedCallable();
@@ -1834,14 +1874,63 @@ static void term(bool canAssign) {
     }
 }
 
-static void comparison(bool canAssign) {
+static void shift(bool canAssign) {
     term(canAssign);
+
+    while (match(TOKEN_LESS_LESS) || match(TOKEN_GREATER_GREATER)) {
+        TokenType op = parser.previous.type;
+        term(false);
+        if (op == TOKEN_LESS_LESS) {
+            emitByte(OP_SHL);
+        } else {
+            emitByte(OP_SHR);
+        }
+        setType("Number");
+        clearResolvedCallable();
+    }
+}
+
+static void bitwiseAnd(bool canAssign) {
+    shift(canAssign);
+
+    while (match(TOKEN_AMPERSAND)) {
+        shift(false);
+        emitByte(OP_BITAND);
+        setType("Number");
+        clearResolvedCallable();
+    }
+}
+
+static void bitwiseXor(bool canAssign) {
+    bitwiseAnd(canAssign);
+
+    while (match(TOKEN_CARET)) {
+        bitwiseAnd(false);
+        emitByte(OP_BITXOR);
+        setType("Number");
+        clearResolvedCallable();
+    }
+}
+
+static void bitwiseOr(bool canAssign) {
+    bitwiseXor(canAssign);
+
+    while (match(TOKEN_PIPE)) {
+        bitwiseXor(false);
+        emitByte(OP_BITOR);
+        setType("Number");
+        clearResolvedCallable();
+    }
+}
+
+static void comparison(bool canAssign) {
+    bitwiseOr(canAssign);
 
     while (match(TOKEN_GREATER) || match(TOKEN_GREATER_EQUAL) ||
            match(TOKEN_LESS) || match(TOKEN_LESS_EQUAL)) {
         TokenType op = parser.previous.type;
         std::string leftType = lastEmittedType;
-        term(false);
+        bitwiseOr(false);
         std::string rightType = lastEmittedType;
         if (isConcreteTypeAnnotation(leftType) && isConcreteTypeAnnotation(rightType)) {
             reportTypeMismatch("Number", leftType, "comparison");
@@ -2056,8 +2145,13 @@ static void primary(bool canAssign) {
 
     if (match(TOKEN_NUMBER)) {
         std::string lexeme(parser.previous.start, parser.previous.length);
-        emitConstant(Value::numberValue(std::strtod(lexeme.c_str(), nullptr)));
-        setType("Number");
+        if (lexeme.find('.') == std::string::npos && lexeme.find('e') == std::string::npos && lexeme.find('E') == std::string::npos) {
+            emitConstant(Value::intValue(static_cast<int64_t>(std::strtoll(lexeme.c_str(), nullptr, 10))));
+            setType("int");
+        } else {
+            emitConstant(Value::numberValue(std::strtod(lexeme.c_str(), nullptr)));
+            setType("float");
+        }
         clearResolvedCallable();
         return;
     }
@@ -2445,22 +2539,46 @@ static void classDeclaration() {
             }
 
             for (const ContractMethod& requiredMethod : contract->methods) {
-                bool found = false;
+                bool foundName = false;
+                bool foundExact = false;
+                int definedArity = 0;
+                bool definedAsync = false;
+
                 for (const ContractMethod& definedMethod : definedMethods) {
-                    if (definedMethod.name == requiredMethod.name &&
-                        definedMethod.arity == requiredMethod.arity &&
-                        definedMethod.isAsync == requiredMethod.isAsync) {
-                        found = true;
-                        break;
+                    if (definedMethod.name == requiredMethod.name) {
+                        foundName = true;
+                        definedArity = definedMethod.arity;
+                        definedAsync = definedMethod.isAsync;
+                        if (definedMethod.arity == requiredMethod.arity &&
+                            definedMethod.isAsync == requiredMethod.isAsync) {
+                            foundExact = true;
+                            break;
+                        }
                     }
                 }
 
-                if (!found) {
-                    std::string message =
-                        "Class '" + tokenLexeme(className) + "' does not satisfy " +
-                        (contract->isTrait ? "trait" : "interface") + " '" +
-                        contractName + "': missing method '" + requiredMethod.name + "'.";
-                    error(message.c_str());
+                if (!foundExact) {
+                    std::string contractTypeStr = (contract->isTrait ? "trait" : "interface");
+                    if (foundName) {
+                        if (definedArity != requiredMethod.arity) {
+                            std::string message =
+                                "Class '" + tokenLexeme(className) + "' implements " + contractTypeStr + " '" +
+                                contractName + "' but method '" + requiredMethod.name + "' has arity mismatch: expected " +
+                                std::to_string(requiredMethod.arity) + " but got " + std::to_string(definedArity) + ".";
+                            error(message.c_str());
+                        } else if (definedAsync != requiredMethod.isAsync) {
+                            std::string message =
+                                "Class '" + tokenLexeme(className) + "' implements " + contractTypeStr + " '" +
+                                contractName + "' but method '" + requiredMethod.name + "' async mismatch: expected " +
+                                (requiredMethod.isAsync ? "async fn" : "fn") + " but got " + (definedAsync ? "async fn" : "fn") + ".";
+                            error(message.c_str());
+                        }
+                    } else {
+                        std::string message =
+                            "Class '" + tokenLexeme(className) + "' does not satisfy " + contractTypeStr + " '" +
+                            contractName + "': missing method '" + requiredMethod.name + "'.";
+                        error(message.c_str());
+                    }
                 }
             }
         }
@@ -3060,6 +3178,12 @@ static void statement() {
         return;
     }
 
+    if (match(TOKEN_DEBUGGER)) {
+        emitByte(OP_BREAKPOINT);
+        optionalSemicolon();
+        return;
+    }
+
     if (match(TOKEN_CONTINUE)) {
         continueStatement();
         return;
@@ -3119,7 +3243,8 @@ static void declaration() {
     }
 }
 
-bool compile(const char* source, FunctionPtr* function) {
+bool compile(const char* source, FunctionPtr* function, const std::string& filename) {
+    currentCompileFilename = filename;
     initLexer(source);
     parser.hadError = false;
     parser.panicMode = false;
@@ -3148,7 +3273,9 @@ bool compile(const char* source, FunctionPtr* function) {
         *function = compiled;
     }
 
-    optimizeFunctionTree(compiled);
+    if (g_optimizerLevel > 0) {
+        optimizeFunctionTree(compiled, g_optimizerLevel);
+    }
 
     return !parser.hadError;
 }

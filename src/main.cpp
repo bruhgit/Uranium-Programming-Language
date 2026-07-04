@@ -1,3 +1,9 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "common.h"
 #include "compiler.h"
 #include "package_manager.h"
@@ -249,7 +255,16 @@ static int compileSourceProgram(const std::filesystem::path& path,
         return 74;
     }
 
-    if (!compile(source.c_str(), function)) {
+    // Debug: write the expanded source to a file to inspect it
+    {
+        std::ofstream dbgFile(workspaceRoot / "expanded_debug.ur");
+        if (dbgFile.is_open()) {
+            dbgFile << source;
+            dbgFile.close();
+        }
+    }
+
+    if (!compile(source.c_str(), function, path.string())) {
         return 65;
     }
 
@@ -364,17 +379,10 @@ static int loadRunnableArchivePayload(const std::filesystem::path& path,
     return 0;
 }
 
-static std::filesystem::path defaultAotOutputPath(const std::filesystem::path& inputPath,
-                                                  const std::filesystem::path& workspaceRoot) {
-    if (lowerCase(inputPath.extension().string()) == ".ur" && !workspaceRoot.empty()) {
-        std::filesystem::path compiledPath = compiledPathForSource(inputPath, workspaceRoot);
-        compiledPath.replace_extension(".exe");
-        return compiledPath;
-    }
-
-    std::filesystem::path outputPath = inputPath;
-    outputPath.replace_extension(".exe");
-    return outputPath;
+static std::filesystem::path defaultAotOutputPath(const std::filesystem::path& inputPath) {
+    std::filesystem::path binaryName = inputPath.filename();
+    binaryName.replace_extension(".exe");
+    return canonicalizePath(std::filesystem::current_path() / "compiled" / binaryName);
 }
 
 static int compileRunnableToBinary(const std::filesystem::path& rawInputPath,
@@ -413,7 +421,7 @@ static int compileRunnableToBinary(const std::filesystem::path& rawInputPath,
 
     std::filesystem::path outputPath;
     if (rawOutputPath.empty()) {
-        outputPath = defaultAotOutputPath(inputPath, workspaceRoot);
+        outputPath = defaultAotOutputPath(inputPath);
     } else {
         outputPath = rawOutputPath.is_absolute()
                          ? rawOutputPath
@@ -428,11 +436,11 @@ static int compileRunnableToBinary(const std::filesystem::path& rawInputPath,
         }
     }
 
-    if (!writeEmbeddedAotBinary(executablePath, archiveStream.str(), outputPath,
-                                &errorMessage)) {
-        std::cerr << errorMessage << std::endl;
-        return 74;
-    }
+    if (!writeEmbeddedAotBinary(executablePath, archiveStream.str(), outputPath, std::filesystem::path(g_compileIconPath),
+                                 &errorMessage)) {
+         std::cerr << errorMessage << std::endl;
+         return 74;
+     }
 
     std::cout << "Compiled " << displayPath(inputPath)
               << " -> " << displayPath(outputPath) << std::endl;
@@ -592,6 +600,7 @@ static std::filesystem::path resolveRegistryRoot(const std::filesystem::path& ra
 
 static int initializeRegistry(const std::filesystem::path& rawTarget,
                               const std::filesystem::path& executablePath) {
+    (void)executablePath;
     std::filesystem::path registryRoot = rawTarget.is_absolute()
                                              ? rawTarget
                                              : canonicalizePath(std::filesystem::current_path() / rawTarget);
@@ -748,13 +757,15 @@ static int packPackage(const std::filesystem::path& rawTarget,
         return 66;
     }
 
+    std::string sourceText;
+    if (!loadProgramWithImports(entryPath, packageRoot, &sourceText, &errorMessage)) {
+        std::cerr << "Failed to load program source: " << errorMessage << std::endl;
+        return 74;
+    }
+
     FunctionPtr function = nullptr;
-    int compileStatus = compileSourceProgram(entryPath, packageRoot, &function, &errorMessage);
-    if (compileStatus != 0) {
-        if (!errorMessage.empty()) {
-            std::cerr << errorMessage << std::endl;
-        }
-        return compileStatus;
+    if (!compile(sourceText.c_str(), &function, entryPath.string())) {
+        return 65;
     }
 
     std::filesystem::path compiledUrcPath = compiledPathForSource(entryPath, packageRoot);
@@ -768,8 +779,8 @@ static int packPackage(const std::filesystem::path& rawTarget,
         archivePath = archivePathForPackage(packageRoot, manifest.name);
     } else {
         archivePath = rawOutput.is_absolute()
-                          ? rawOutput
-                          : canonicalizePath(std::filesystem::current_path() / rawOutput);
+            ? rawOutput
+            : canonicalizePath(std::filesystem::current_path() / rawOutput);
         if (directoryExists(archivePath)) {
             archivePath /= std::filesystem::path(manifest.name).replace_extension(".ura");
         }
@@ -778,7 +789,7 @@ static int packPackage(const std::filesystem::path& rawTarget,
         }
     }
 
-    if (!writeUraFile(function, archivePath, manifest.rawText, manifest.entry, &errorMessage)) {
+    if (!writeUraFile(function, archivePath, manifest.rawText, manifest.entry, sourceText, &errorMessage)) {
         std::cerr << errorMessage << std::endl;
         return 74;
     }
@@ -864,17 +875,19 @@ static int runTests(const std::filesystem::path& rawTarget,
     int passed = 0;
     int failed = 0;
 
+    auto startTime = std::chrono::high_resolution_clock::now();
+
     for (std::size_t index = 0; index < testFiles.size(); ++index) {
         const std::filesystem::path& testFile = testFiles[index];
-        std::cout << "[TEST] " << relativeDisplayPath(testFile, displayRoot) << std::endl;
+        std::cout << "\033[1;34m[TEST]\033[0m " << relativeDisplayPath(testFile, displayRoot) << std::endl;
 
         VM vm;
         int status = runFile(vm, testFile, executablePath, {});
         if (status == 0) {
-            std::cout << "PASS" << std::endl;
+            std::cout << "\033[1;32mPASS\033[0m" << std::endl;
             passed++;
         } else {
-            std::cout << "FAIL (" << status << ")" << std::endl;
+            std::cout << "\033[1;31mFAIL (exit code: " << status << ")\033[0m" << std::endl;
             failed++;
         }
 
@@ -883,8 +896,14 @@ static int runTests(const std::filesystem::path& rawTarget,
         }
     }
 
+    auto endTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
+
     std::cout << std::endl
-              << "Summary: " << passed << " passed, " << failed << " failed." << std::endl;
+              << "Summary: " 
+              << "\033[1;32m" << passed << " passed\033[0m, " 
+              << "\033[1;31m" << failed << " failed\033[0m "
+              << "in " << std::fixed << std::setprecision(1) << elapsed.count() << "ms" << std::endl;
     return failed == 0 ? 0 : 1;
 }
 
@@ -1030,12 +1049,121 @@ static int initPackage(const std::filesystem::path& rawTarget) {
     return 0;
 }
 
+std::size_t g_maxHeapBytes = 0;
+std::size_t g_baseYoungBytes = 64 * 1024;
+std::size_t g_baseFullBytes = 512 * 1024;
+int g_maxFrames = 100000;
+bool g_vmDebugMode = false;
+
+int g_optimizerLevel = 0;
+
+std::wstring g_compileIconPath = L"";
+std::wstring g_compileCompanyName = L"";
+std::wstring g_compileFileDescription = L"";
+std::wstring g_compileFileVersion = L"";
+std::wstring g_compileProductName = L"";
+std::wstring g_compileProductVersion = L"";
+
+
+
+static std::wstring toWString(const std::string& str) {
+    if (str.empty()) return L"";
+#ifdef _WIN32
+    int sizeNeeded = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), NULL, 0);
+    std::wstring wstrTo(sizeNeeded, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstrTo[0], sizeNeeded);
+    return wstrTo;
+#else
+    return std::wstring(str.begin(), str.end());
+#endif
+}
+
+static bool parseSize(const std::string& str, std::size_t* result) {
+    if (str.empty()) return false;
+    
+    std::size_t length = str.length();
+    char suffix = str.back();
+    std::string numberPart = str;
+    std::size_t multiplier = 1;
+    
+    if (suffix == 'K' || suffix == 'k') {
+        multiplier = 1024;
+        numberPart = str.substr(0, length - 1);
+    } else if (suffix == 'M' || suffix == 'm') {
+        multiplier = 1024 * 1024;
+        numberPart = str.substr(0, length - 1);
+    } else if (suffix == 'G' || suffix == 'g') {
+        multiplier = 1024 * 1024 * 1024;
+        numberPart = str.substr(0, length - 1);
+    }
+    
+    for (char c : numberPart) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    
+    try {
+        *result = std::stoull(numberPart) * multiplier;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool parseLimit(const std::string& str, int* result) {
+    for (char c : str) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    try {
+        *result = std::stoi(str);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static int compileToUrc(const std::filesystem::path& rawInputPath,
+                         const std::filesystem::path& rawOutputPath,
+                         const std::filesystem::path& executablePath) {
+    std::filesystem::path inputPath = resolveInputPath(rawInputPath, executablePath);
+    FunctionPtr function = nullptr;
+    std::string errorMessage;
+    std::filesystem::path workspaceRoot = findWorkspaceRoot(inputPath, executablePath);
+
+    int compileStatus = compileSourceProgram(inputPath, workspaceRoot, &function, &errorMessage);
+    if (compileStatus != 0) {
+        if (!errorMessage.empty()) {
+            std::cerr << errorMessage << std::endl;
+        }
+        return compileStatus;
+    }
+
+    std::filesystem::path outputPath = rawOutputPath;
+    if (outputPath.empty()) {
+        outputPath = inputPath;
+        outputPath.replace_extension(".urc");
+    }
+
+    if (!writeUrcFile(function, outputPath, &errorMessage)) {
+        std::cerr << errorMessage << std::endl;
+        return 74;
+    }
+
+    std::cout << "Compiled " << displayPath(inputPath)
+              << " -> " << displayPath(outputPath) << std::endl;
+    return 0;
+}
+
 static void printUsage() {
     std::cout
         << "Usage:\n"
         << "  uranium [path] [args...]\n"
         << "  uranium <path> --compile [output.exe]\n"
         << "  uranium --compile <path> [output.exe]\n"
+        << "  uranium --compile-urc <path> [-out <output.urc>]\n"
         << "  uranium --version\n"
         << "  uranium --help\n"
         << "  uranium --test [path]\n"
@@ -1055,24 +1183,154 @@ static void printUsage() {
         << "  uranium --update <package-dir-or-manifest> [registry-dir]\n"
         << "  uranium --remove <package-dir-or-manifest> <dependency-name> [registry-dir]\n"
         << "  uranium --pack <package-dir-or-manifest> [output.ura]\n"
-        << "  uranium --init-package <directory>\n";
+        << "  uranium --init-package <directory>\n"
+        << "  uranium --install-file <path.ura> [registry-dir]\n"
+        << "  uranium --load-library <path.ura/.urc/.ur>\n"
+        << "  uranium --unload-library <name>\n"
+        << "\nOptimization Options:\n"
+        << "  --O0                     Disable optimization (default)\n"
+        << "  --O1                     Basic optimizations (constant fold, dead store)\n"
+        << "  --O2                     Medium optimizations (O1 + jump threading, BOC elimination)\n"
+        << "  --O3                     Aggressive optimizations (O2 + strength reduction, NOP compaction)\n"
+        << "\nVM Options:\n"
+        << "  --vm-debug-mode          Enable execution instruction debug tracing\n"
+        << "  --gc <size>              Set young/full collection threshold (e.g. 64K, 1M)\n"
+        << "  --vm <size>              Set maximum heap memory limit (e.g. 10M, 1G)\n"
+        << "  --re <limit>             Set maximum recursion call frame limit\n"
+        << "\nCompile Customization Options:\n"
+        << "  --icon <path.ico>        Custom icon for compiled executables\n"
+        << "  --company <text>         Custom CompanyName metadata\n"
+        << "  --desc <text>            Custom FileDescription metadata\n"
+        << "  --product <text>         Custom ProductName metadata\n"
+        << "  --version-info <text>    Custom File/Product Version metadata\n";
 }
 
 int main(int argc, const char* argv[]) {
     std::filesystem::path executablePath = canonicalizePath(argv[0]);
+
+    // Parse and filter options
+    std::vector<const char*> filteredArgs;
+    filteredArgs.push_back(argv[0]);
+
+    bool vmDebugMode = false;
+    std::string gcSizeStr = "";
+    std::string vmSizeStr = "";
+    std::string reLimitStr = "";
+    bool compileUrc = false;
+    std::string outPathStr = "";
+
+    std::string compileIcon = "";
+    std::string compileCompany = "";
+    std::string compileDesc = "";
+    std::string compileProduct = "";
+    std::string compileVersion = "";
+
+    for (int index = 1; index < argc; ++index) {
+        std::string arg = argv[index];
+        if (arg == "--vm-debug-mode") {
+            vmDebugMode = true;
+        } else if (arg == "--compile-urc") {
+            compileUrc = true;
+        } else if (arg == "--O0") {
+            g_optimizerLevel = 0;
+        } else if (arg == "--O1") {
+            g_optimizerLevel = 1;
+        } else if (arg == "--O2") {
+            g_optimizerLevel = 2;
+        } else if (arg == "--O3") {
+            g_optimizerLevel = 3;
+        } else if (arg == "--gc" && index + 1 < argc) {
+            gcSizeStr = argv[++index];
+        } else if (arg == "--vm" && index + 1 < argc) {
+            vmSizeStr = argv[++index];
+        } else if (arg == "--re" && index + 1 < argc) {
+            reLimitStr = argv[++index];
+        } else if (arg == "-out" && index + 1 < argc) {
+            outPathStr = argv[++index];
+        } else if (arg == "--icon" && index + 1 < argc) {
+            compileIcon = argv[++index];
+        } else if (arg == "--company" && index + 1 < argc) {
+            compileCompany = argv[++index];
+        } else if (arg == "--desc" && index + 1 < argc) {
+            compileDesc = argv[++index];
+        } else if (arg == "--product" && index + 1 < argc) {
+            compileProduct = argv[++index];
+        } else if (arg == "--version-info" && index + 1 < argc) {
+            compileVersion = argv[++index];
+        } else {
+            filteredArgs.push_back(argv[index]);
+        }
+    }
+
+    g_vmDebugMode = vmDebugMode;
+
+    if (!gcSizeStr.empty()) {
+        std::size_t size = 0;
+        if (parseSize(gcSizeStr, &size)) {
+            g_baseYoungBytes = size;
+            g_baseFullBytes = size * 8;
+        } else {
+            std::cerr << "Invalid --gc size: " << gcSizeStr << std::endl;
+            return 64;
+        }
+    }
+
+    if (!vmSizeStr.empty()) {
+        std::size_t size = 0;
+        if (parseSize(vmSizeStr, &size)) {
+            g_maxHeapBytes = size;
+        } else {
+            std::cerr << "Invalid --vm size: " << vmSizeStr << std::endl;
+            return 64;
+        }
+    }
+
+    if (!reLimitStr.empty()) {
+        int limit = 0;
+        if (parseLimit(reLimitStr, &limit)) {
+            g_maxFrames = limit;
+        } else {
+            std::cerr << "Invalid --re limit: " << reLimitStr << std::endl;
+            return 64;
+        }
+    }
+
+    g_compileIconPath = toWString(compileIcon);
+    g_compileCompanyName = toWString(compileCompany);
+    g_compileFileDescription = toWString(compileDesc);
+    g_compileFileVersion = toWString(compileVersion);
+    g_compileProductName = toWString(compileProduct);
+    g_compileProductVersion = toWString(compileVersion);
+
+    int newArgc = static_cast<int>(filteredArgs.size());
+    const char** newArgv = filteredArgs.data();
+    argc = newArgc;
+    argv = newArgv;
+
+    // Re-configure runtime process context with updated args/argc
     configureRuntimeProcessContext(executablePath.generic_string(), "", {});
 
     bool handledEmbeddedProgram = false;
     int embeddedProgramStatus =
-        maybeRunEmbeddedProgram(executablePath, argc, argv, &handledEmbeddedProgram);
+        maybeRunEmbeddedProgram(executablePath, newArgc, newArgv, &handledEmbeddedProgram);
     if (handledEmbeddedProgram) {
         return embeddedProgramStatus;
     }
 
-    if (argc == 1) {
+    if (newArgc == 1) {
         VM vm;
         repl(vm);
         return 0;
+    }
+
+    if (compileUrc) {
+        if (newArgc < 2) {
+            std::cerr << "Usage: uranium --compile-urc <path> [-out <output.urc>]\n";
+            return 64;
+        }
+        std::filesystem::path inputPath = newArgv[1];
+        std::filesystem::path outputPath = outPathStr;
+        return compileToUrc(inputPath, outputPath, executablePath);
     }
 
     int compileIndex = -1;
@@ -1290,6 +1548,189 @@ int main(int argc, const char* argv[]) {
             outputPath = argv[3];
         }
         return packPackage(argv[2], executablePath, outputPath);
+    }
+
+    if (argument == "--install-file") {
+        if (argc < 3) {
+            std::cerr << "Usage: uranium --install-file <path.ura> [registry-dir]\n";
+            return 64;
+        }
+
+        std::filesystem::path uraPath = resolveInputPath(argv[2], executablePath);
+        if (!fileExists(uraPath)) {
+            std::cerr << "File not found: " << displayPath(uraPath) << std::endl;
+            return 66;
+        }
+
+        FunctionPtr function = nullptr;
+        std::string manifestText;
+        std::string entryPath;
+        std::string sourceText;
+        std::string errorMessage;
+        if (!readUraFile(uraPath, &function, &manifestText, &entryPath, &sourceText, &errorMessage)) {
+            std::cerr << "Failed to read .ura package: " << errorMessage << std::endl;
+            return 74;
+        }
+
+        // Parse manifest to get package name and version
+        std::string name = "unknown";
+        std::string version = "0.1.0";
+        // Simple JSON-like parsing for name and version in manifestText
+        std::size_t namePos = manifestText.find("\"name\"");
+        if (namePos != std::string::npos) {
+            std::size_t colonPos = manifestText.find(":", namePos);
+            if (colonPos != std::string::npos) {
+                std::size_t startQuote = manifestText.find("\"", colonPos);
+                if (startQuote != std::string::npos) {
+                    std::size_t endQuote = manifestText.find("\"", startQuote + 1);
+                    if (endQuote != std::string::npos) {
+                        name = manifestText.substr(startQuote + 1, endQuote - startQuote - 1);
+                    }
+                }
+            }
+        }
+        std::size_t verPos = manifestText.find("\"version\"");
+        if (verPos != std::string::npos) {
+            std::size_t colonPos = manifestText.find(":", verPos);
+            if (colonPos != std::string::npos) {
+                std::size_t startQuote = manifestText.find("\"", colonPos);
+                if (startQuote != std::string::npos) {
+                    std::size_t endQuote = manifestText.find("\"", startQuote + 1);
+                    if (endQuote != std::string::npos) {
+                        version = manifestText.substr(startQuote + 1, endQuote - startQuote - 1);
+                    }
+                }
+            }
+        }
+
+        std::filesystem::path registryPath;
+        if (argc >= 4) {
+            registryPath = argv[3];
+        } else {
+            registryPath = defaultPackageRegistryPath(std::filesystem::current_path());
+        }
+
+        std::error_code ec;
+        std::filesystem::path destDir = registryPath / "packages" / name / version;
+        std::filesystem::create_directories(destDir, ec);
+        if (ec) {
+            std::cerr << "Could not create registry directory: " << ec.message() << std::endl;
+            return 74;
+        }
+
+        // Write the package files or copy the .ura file
+        std::filesystem::path destFile = destDir / (name + ".ura");
+        std::filesystem::copy_file(uraPath, destFile, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::cerr << "Failed to copy package file: " << ec.message() << std::endl;
+            return 74;
+        }
+
+        // Write the source file so the loader can read it
+        if (!sourceText.empty()) {
+            std::filesystem::path sourceDest = destDir / entryPath;
+            std::filesystem::create_directories(sourceDest.parent_path(), ec);
+            std::ofstream srcFile(sourceDest);
+            srcFile << sourceText;
+            srcFile.close();
+        }
+
+        // Also write a basic uranium.pkg so loader can read it
+        std::ofstream pkgFile(destDir / "uranium.pkg");
+        pkgFile << manifestText;
+        pkgFile.close();
+
+        std::cout << "Successfully installed package " << name << "@" << version << " to " << displayPath(destDir) << std::endl;
+        return 0;
+    }
+
+    if (argument == "--load-library") {
+        if (argc < 3) {
+            std::cerr << "Usage: uranium --load-library <path.ura/.urc/.ur>\n";
+            return 64;
+        }
+
+        std::filesystem::path libPath = resolveInputPath(argv[2], executablePath);
+        if (!fileExists(libPath)) {
+            std::cerr << "Library file not found: " << displayPath(libPath) << std::endl;
+            return 66;
+        }
+
+        std::filesystem::path tpDir = executablePath.parent_path() / "urlib" / "third_party";
+        std::error_code ec;
+        std::filesystem::create_directories(tpDir, ec);
+
+        std::string targetName = libPath.stem().string();
+        std::string ext = lowerCase(libPath.extension().string());
+
+        if (ext == ".ura") {
+            FunctionPtr function = nullptr;
+            std::string manifestText;
+            std::string entryPath;
+            std::string sourceText;
+            std::string errorMessage;
+            if (readUraFile(libPath, &function, &manifestText, &entryPath, &sourceText, &errorMessage)) {
+                // Parse manifest to get package name
+                std::size_t namePos = manifestText.find("\"name\"");
+                if (namePos != std::string::npos) {
+                    std::size_t colonPos = manifestText.find(":", namePos);
+                    if (colonPos != std::string::npos) {
+                        std::size_t startQuote = manifestText.find("\"", colonPos);
+                        if (startQuote != std::string::npos) {
+                            std::size_t endQuote = manifestText.find("\"", startQuote + 1);
+                            if (endQuote != std::string::npos) {
+                                targetName = manifestText.substr(startQuote + 1, endQuote - startQuote - 1);
+                            }
+                        }
+                    }
+                }
+                // If it has source code embedded, extract it as [targetName].ur in third_party
+                if (!sourceText.empty()) {
+                    std::ofstream srcFile(tpDir / (targetName + ".ur"));
+                    srcFile << sourceText;
+                    srcFile.close();
+                }
+            }
+        }
+
+        std::filesystem::path destFile = tpDir / (targetName + ext);
+        std::filesystem::copy_file(libPath, destFile, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::cerr << "Failed to load library: " << ec.message() << std::endl;
+            return 74;
+        }
+
+        std::cout << "Successfully loaded library '" << targetName << "' to global third_party." << std::endl;
+        return 0;
+    }
+
+    if (argument == "--unload-library") {
+        if (argc < 3) {
+            std::cerr << "Usage: uranium --unload-library <name>\n";
+            return 64;
+        }
+
+        std::string libName = argv[2];
+        std::filesystem::path tpDir = executablePath.parent_path() / "urlib" / "third_party";
+        std::error_code ec;
+
+        bool removed = false;
+        std::vector<std::string> extensions = {".ur", ".ura", ".urc"};
+        for (const auto& ext : extensions) {
+            std::filesystem::path file = tpDir / (libName + ext);
+            if (fileExists(file)) {
+                std::filesystem::remove(file, ec);
+                removed = true;
+            }
+        }
+
+        if (removed) {
+            std::cout << "Successfully unloaded library '" << libName << "' from global third_party." << std::endl;
+            return 0;
+        } else {
+            std::cerr << "Library '" << libName << "' not found in global third_party." << std::endl;
+            return 66;
+        }
     }
 
     if (argument == "--init-package") {

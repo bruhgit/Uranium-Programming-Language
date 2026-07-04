@@ -248,6 +248,12 @@ bool matchesTypeExpr(const Value& value, const TypeExpr& expected) {
         return value.isBool();
     }
     if (expected.name == "Number") {
+        return value.isNumber() || value.isInt();
+    }
+    if (expected.name == "int") {
+        return value.isInt();
+    }
+    if (expected.name == "float") {
         return value.isNumber();
     }
     if (expected.name == "String") {
@@ -305,7 +311,10 @@ std::string runtimeTypeNameInternal(const Value& value,
         return "Bool";
     }
     if (value.isNumber()) {
-        return "Number";
+        return "float";
+    }
+    if (value.isInt()) {
+        return "int";
     }
     if (value.isString()) {
         return "String";
@@ -415,6 +424,13 @@ bool areTypesCompatible(const std::string& expected, const std::string& actual) 
     }
 
     if (normalizedExpected == normalizedActual) {
+        return true;
+    }
+
+    if (normalizedExpected == "Number" && (normalizedActual == "int" || normalizedActual == "float")) {
+        return true;
+    }
+    if (normalizedActual == "Number" && (normalizedExpected == "int" || normalizedExpected == "float")) {
         return true;
     }
 

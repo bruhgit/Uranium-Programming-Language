@@ -8,7 +8,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <wincrypt.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
+#endif
 #elif defined(__APPLE__)
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonDigest.h>

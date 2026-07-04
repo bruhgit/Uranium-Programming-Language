@@ -514,12 +514,6 @@ bool matchesVersionRequest(const SemverVersion& version, const VersionRequest& r
     return compareSemverVersion(version, upperBound) < 0;
 }
 
-std::string semverToString(const SemverVersion& version) {
-    return std::to_string(version.major) + "." +
-           std::to_string(version.minor) + "." +
-           std::to_string(version.patch);
-}
-
 std::uint64_t fnv1aStep(std::uint64_t hash, const char* data, std::size_t length) {
     const std::uint64_t prime = 1099511628211ull;
     for (std::size_t index = 0; index < length; ++index) {
@@ -1296,6 +1290,20 @@ bool resolveInstalledPackageEntry(const std::filesystem::path& ownerPackageRoot,
             return true;
         }
 
+        // Fallback: check with .ura or .urc extension
+        if (candidate.extension() == ".ur") {
+            std::filesystem::path uraCandidate = candidate;
+            uraCandidate.replace_extension(".ura");
+            if (assignIfExists(uraCandidate)) {
+                return true;
+            }
+            std::filesystem::path urcCandidate = candidate;
+            urcCandidate.replace_extension(".urc");
+            if (assignIfExists(urcCandidate)) {
+                return true;
+            }
+        }
+
         PackageManifestData manifest;
         if (!loadPackageManifestData(dependencyRoot, &manifest, errorMessage)) {
             return false;
@@ -1303,6 +1311,29 @@ bool resolveInstalledPackageEntry(const std::filesystem::path& ownerPackageRoot,
 
         candidate = dependencyRoot / manifest.entry;
         if (assignIfExists(candidate)) {
+            return true;
+        }
+
+        if (candidate.extension() == ".ur") {
+            std::filesystem::path uraCandidate = candidate;
+            uraCandidate.replace_extension(".ura");
+            if (assignIfExists(uraCandidate)) {
+                return true;
+            }
+            std::filesystem::path urcCandidate = candidate;
+            urcCandidate.replace_extension(".urc");
+            if (assignIfExists(urcCandidate)) {
+                return true;
+            }
+        }
+
+        // Also check if there is a file named [packageName].ura or [packageName].urc in the root
+        std::filesystem::path defaultUra = dependencyRoot / (dependencyName + ".ura");
+        if (assignIfExists(defaultUra)) {
+            return true;
+        }
+        std::filesystem::path defaultUrc = dependencyRoot / (dependencyName + ".urc");
+        if (assignIfExists(defaultUrc)) {
             return true;
         }
 
@@ -1527,6 +1558,26 @@ bool installPackageDependencies(const std::filesystem::path& packageRoot,
     if (!installPackageDependenciesFromLockData(canonicalPackageRoot, canonicalRegistry,
                                                 lockData, errorMessage)) {
         return false;
+    }
+
+    // Write uranium.dep file mapping package names to their resolved entry paths
+    std::filesystem::path depFilePath = canonicalPackageRoot / "uranium.dep";
+    std::ofstream depFile(depFilePath, std::ios::trunc);
+    if (depFile.is_open()) {
+        for (const auto& pkg : lockData.packages) {
+            std::filesystem::path depDir = installedDependencyRoot(canonicalPackageRoot, pkg.second.name, pkg.second.version);
+            std::filesystem::path entryPath = depDir / pkg.second.entry;
+            // Fallback to .ur / .ura / .urc if specified entry doesn't exist directly (it might be extracted)
+            if (!std::filesystem::exists(entryPath)) {
+                if (std::filesystem::exists(depDir / (pkg.second.name + ".ur"))) {
+                    entryPath = depDir / (pkg.second.name + ".ur");
+                } else if (std::filesystem::exists(depDir / (pkg.second.name + ".ura"))) {
+                    entryPath = depDir / (pkg.second.name + ".ura");
+                }
+            }
+            depFile << pkg.second.name << "=" << std::filesystem::absolute(entryPath).generic_string() << "\n";
+        }
+        depFile.close();
     }
 
     if (installedLock != nullptr) {

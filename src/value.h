@@ -42,12 +42,14 @@ enum ValueType {
     VAL_INSTANCE,
     VAL_BOUND_METHOD,
     VAL_TASK,
+    VAL_INT,
 };
 
 struct Value {
     ValueType type = VAL_NIL;
     bool boolean = false;
     double number = 0.0;
+    int64_t integer = 0;
     std::string string;
     FunctionPtr function = nullptr;
     ClosurePtr closure = nullptr;
@@ -65,6 +67,12 @@ struct Value {
     }
 
     explicit Value(double numberValue) : type(VAL_NUMBER), number(numberValue) {
+    }
+
+    explicit Value(int64_t integerValue) : type(VAL_INT), integer(integerValue) {
+    }
+
+    explicit Value(int integerValue) : type(VAL_INT), integer(integerValue) {
     }
 
     explicit Value(std::string stringValue)
@@ -119,6 +127,10 @@ struct Value {
 
     static Value numberValue(double number) {
         return Value(number);
+    }
+
+    static Value intValue(int64_t integer) {
+        return Value(integer);
     }
 
     static Value boolValue(bool boolean) {
@@ -177,6 +189,10 @@ struct Value {
         return type == VAL_NUMBER;
     }
 
+    bool isInt() const {
+        return type == VAL_INT;
+    }
+
     bool isBool() const {
         return type == VAL_BOOL;
     }
@@ -223,6 +239,10 @@ struct Value {
 
     double asNumber() const {
         return number;
+    }
+
+    int64_t asInt() const {
+        return integer;
     }
 
     bool asBool() const {

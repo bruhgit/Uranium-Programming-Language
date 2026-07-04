@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "http_native.h"
 #include "heap.h"
 #include "object.h"
@@ -7,7 +11,9 @@
 #include <string>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <winhttp.h>
 #elif defined(URANIUM_HAS_CURL)

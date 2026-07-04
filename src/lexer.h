@@ -11,6 +11,9 @@ enum TokenType {
     TOKEN_DOT,
     TOKEN_QUESTION,
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH,
+    TOKEN_PERCENT,
+    TOKEN_AMPERSAND, TOKEN_PIPE, TOKEN_CARET, TOKEN_TILDE,
+    TOKEN_LESS_LESS, TOKEN_GREATER_GREATER,
     TOKEN_BANG,
     TOKEN_EQUAL,
     TOKEN_GREATER, TOKEN_LESS,
@@ -34,6 +37,7 @@ enum TokenType {
     TOKEN_CATCH,
     TOKEN_CLASS, TOKEN_FN, TOKEN_LET, TOKEN_CONST,
     TOKEN_CONTINUE,
+    TOKEN_DEBUGGER,
     TOKEN_DEFAULT,
     TOKEN_ELSE, TOKEN_FALSE, TOKEN_FOR,
     TOKEN_ELIF,
@@ -66,8 +70,11 @@ struct Token {
     int column;
 };
 
+#include <string>
+
 void initLexer(const char* source);
 Token scanToken();
 const char* tokenTypeName(TokenType type);
+std::string getSourceLine(int line);
 
 #endif

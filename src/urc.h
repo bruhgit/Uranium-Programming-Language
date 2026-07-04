@@ -26,29 +26,66 @@ bool writeUraFile(const FunctionPtr& function,
                   const std::filesystem::path& path,
                   const std::string& manifestText,
                   const std::string& entryPath,
+                  const std::string& sourceText,
                   std::string* errorMessage);
 
 bool writeUraStream(const FunctionPtr& function,
                     std::ostream& stream,
                     const std::string& manifestText,
                     const std::string& entryPath,
+                    const std::string& sourceText,
                     std::string* errorMessage);
 
 bool readUraFile(const std::filesystem::path& path,
                  FunctionPtr* function,
                  std::string* manifestText,
                  std::string* entryPath,
+                 std::string* sourceText,
                  std::string* errorMessage);
 
 bool readUraStream(std::istream& stream,
                    FunctionPtr* function,
                    std::string* manifestText,
                    std::string* entryPath,
+                   std::string* sourceText,
                    std::string* errorMessage);
+
+inline bool writeUraFile(const FunctionPtr& function,
+                         const std::filesystem::path& path,
+                         const std::string& manifestText,
+                         const std::string& entryPath,
+                         std::string* errorMessage) {
+    return writeUraFile(function, path, manifestText, entryPath, "", errorMessage);
+}
+
+inline bool writeUraStream(const FunctionPtr& function,
+                           std::ostream& stream,
+                           const std::string& manifestText,
+                           const std::string& entryPath,
+                           std::string* errorMessage) {
+    return writeUraStream(function, stream, manifestText, entryPath, "", errorMessage);
+}
+
+inline bool readUraFile(const std::filesystem::path& path,
+                        FunctionPtr* function,
+                        std::string* manifestText,
+                        std::string* entryPath,
+                        std::string* errorMessage) {
+    return readUraFile(path, function, manifestText, entryPath, nullptr, errorMessage);
+}
+
+inline bool readUraStream(std::istream& stream,
+                          FunctionPtr* function,
+                          std::string* manifestText,
+                          std::string* entryPath,
+                          std::string* errorMessage) {
+    return readUraStream(stream, function, manifestText, entryPath, nullptr, errorMessage);
+}
 
 bool writeEmbeddedAotBinary(const std::filesystem::path& runtimeExecutablePath,
                             const std::string& payload,
                             const std::filesystem::path& outputPath,
+                            const std::filesystem::path& iconPath,
                             std::string* errorMessage);
 
 bool readEmbeddedAotPayload(const std::filesystem::path& executablePath,

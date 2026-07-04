@@ -405,27 +405,191 @@ bool optimizeChunk(Chunk* chunk) {
     return changed;
 }
 
-void optimizeNestedFunctions(const FunctionPtr& function) {
+bool optimizeChunkO2(Chunk* chunk) {
+    bool changed = false;
+    bool passChanged;
+    do {
+        passChanged = false;
+        for (int offset = 0; offset < static_cast<int>(chunk->code.size());) {
+            uint8_t opcode = chunk->code[offset];
+            int size = instructionSize(*chunk, offset);
+            
+            // 1. Jump Threading
+            if (opcode == OP_JUMP) {
+                int jump = (chunk->code[offset + 1] << 8) | chunk->code[offset + 2];
+                int target = offset + 3 + jump;
+                int currentTarget = target;
+                bool threaded = false;
+                std::unordered_set<int> visited;
+                while (currentTarget >= 0 && currentTarget < static_cast<int>(chunk->code.size()) && 
+                       chunk->code[currentTarget] == OP_JUMP) {
+                    if (visited.count(currentTarget)) break;
+                    visited.insert(currentTarget);
+                    int nextJump = (chunk->code[currentTarget + 1] << 8) | chunk->code[currentTarget + 2];
+                    currentTarget = currentTarget + 3 + nextJump;
+                    threaded = true;
+                }
+                if (threaded && currentTarget != target) {
+                    int newJump = currentTarget - (offset + 3);
+                    if (newJump >= 0 && newJump <= 0xffff) {
+                        chunk->code[offset + 1] = (newJump >> 8) & 0xff;
+                        chunk->code[offset + 2] = newJump & 0xff;
+                        passChanged = true;
+                        changed = true;
+                    }
+                }
+            }
+            
+            // 2. Branch-on-Constant (BOC) Elimination
+            if (opcode == OP_TRUE || opcode == OP_FALSE) {
+                int nextOffset = offset + size;
+                if (nextOffset < static_cast<int>(chunk->code.size()) && chunk->code[nextOffset] == OP_JUMP_IF_FALSE) {
+                    if (opcode == OP_TRUE) {
+                        chunk->code[offset] = OP_NOP;
+                        chunk->code[nextOffset] = OP_NOP;
+                        chunk->code[nextOffset + 1] = OP_NOP;
+                        chunk->code[nextOffset + 2] = OP_NOP;
+                    } else {
+                        chunk->code[offset] = OP_NOP;
+                        chunk->code[nextOffset] = OP_JUMP;
+                    }
+                    passChanged = true;
+                    changed = true;
+                }
+            }
+            
+            offset += std::max(1, size);
+        }
+    } while (passChanged);
+    return changed;
+}
+
+void compactNops(Chunk* chunk) {
+    std::vector<int> oldToNew(chunk->code.size(), -1);
+    std::vector<uint8_t> newCode;
+    std::vector<int> newLines;
+    
+    int newOffset = 0;
+    for (int offset = 0; offset < static_cast<int>(chunk->code.size());) {
+        uint8_t opcode = chunk->code[offset];
+        int size = instructionSize(*chunk, offset);
+        if (opcode == OP_NOP) {
+            for (int i = 0; i < size; ++i) {
+                oldToNew[offset + i] = -1;
+            }
+        } else {
+            for (int i = 0; i < size; ++i) {
+                oldToNew[offset + i] = newOffset + i;
+            }
+            for (int i = 0; i < size; ++i) {
+                newCode.push_back(chunk->code[offset + i]);
+                newLines.push_back(chunk->lines[offset + i]);
+            }
+            newOffset += size;
+        }
+        offset += std::max(1, size);
+    }
+    
+    for (int offset = 0; offset < static_cast<int>(newCode.size());) {
+        uint8_t opcode = newCode[offset];
+        int size = instructionSize(*chunk, offset);
+        if (opcode == OP_JUMP || opcode == OP_JUMP_IF_FALSE || opcode == OP_LOOP) {
+            int oldOffset = -1;
+            for (int i = 0; i < static_cast<int>(oldToNew.size()); ++i) {
+                if (oldToNew[i] == offset) {
+                    oldOffset = i;
+                    break;
+                }
+            }
+            
+            if (oldOffset != -1) {
+                int jump = (chunk->code[oldOffset + 1] << 8) | chunk->code[oldOffset + 2];
+                int oldTarget = oldOffset + 3;
+                if (opcode == OP_LOOP) {
+                    oldTarget -= jump;
+                } else {
+                    oldTarget += jump;
+                }
+                
+                if (oldTarget >= 0 && oldTarget < static_cast<int>(oldToNew.size())) {
+                    int newTarget = oldToNew[oldTarget];
+                    if (newTarget != -1) {
+                        int newJump = 0;
+                        if (opcode == OP_LOOP) {
+                            newJump = (offset + 3) - newTarget;
+                        } else {
+                            newJump = newTarget - (offset + 3);
+                        }
+                        newCode[offset + 1] = (newJump >> 8) & 0xff;
+                        newCode[offset + 2] = newJump & 0xff;
+                    }
+                }
+            }
+        }
+        offset += std::max(1, size);
+    }
+    
+    chunk->code = newCode;
+    chunk->lines = newLines;
+}
+
+bool optimizeChunkO3(Chunk* chunk) {
+    bool changed = false;
+    for (int offset = 0; offset < static_cast<int>(chunk->code.size());) {
+        uint8_t opcode = chunk->code[offset];
+        int size = instructionSize(*chunk, offset);
+        
+        // Strength Reduction: Division by constant -> Multiplication by reciprocal
+        if (opcode == OP_CONSTANT) {
+            int constIndex = chunk->code[offset + 1];
+            Value val = chunk->constants.values[constIndex];
+            int nextOffset = offset + size;
+            if (nextOffset < static_cast<int>(chunk->code.size()) && val.isNumber()) {
+                uint8_t nextOp = chunk->code[nextOffset];
+                if (nextOp == OP_DIVIDE && val.asNumber() != 0.0) {
+                    chunk->constants.values[constIndex] = Value::numberValue(1.0 / val.asNumber());
+                    chunk->code[nextOffset] = OP_MULTIPLY;
+                    changed = true;
+                }
+            }
+        }
+        offset += std::max(1, size);
+    }
+    return changed;
+}
+
+void optimizeNestedFunctions(const FunctionPtr& function, int level) {
     if (function == nullptr || function->optimized) {
         return;
     }
 
     for (const Value& constant : function->chunk.constants.values) {
         if (constant.isFunction() && constant.asFunction() != nullptr) {
-            optimizeFunctionTree(constant.asFunction());
+            optimizeFunctionTree(constant.asFunction(), level);
         }
     }
 }
 
 } // namespace
 
-void optimizeFunctionTree(const FunctionPtr& function) {
+void optimizeFunctionTree(const FunctionPtr& function, int level) {
     if (function == nullptr || function->optimized) {
         return;
     }
 
-    optimizeNestedFunctions(function);
-    optimizeChunk(&function->chunk);
+    optimizeNestedFunctions(function, level);
+    
+    if (level >= 1) {
+        optimizeChunk(&function->chunk);
+    }
+    if (level >= 2) {
+        optimizeChunkO2(&function->chunk);
+    }
+    if (level >= 3) {
+        optimizeChunkO3(&function->chunk);
+        compactNops(&function->chunk);
+    }
+    
     function->optimized = true;
 }
 

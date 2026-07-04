@@ -1,5 +1,11 @@
 #include "source_loader.h"
 #include "package_manager.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -123,6 +129,15 @@ std::filesystem::path canonicalize(const std::filesystem::path& path) {
 bool readFileText(const std::filesystem::path& path,
                   std::string* content,
                   std::string* errorMessage) {
+    std::error_code ec;
+    if (path.extension() == ".ura" || path.extension() == ".urc") {
+        // If it's a compiled file being imported, we can't parse its source directly.
+        // But since --install-file now extracts the source code into the directory,
+        // this path will usually point to the extracted .ur file.
+        // In case it still points here, return empty or try to handle.
+        *content = "";
+        return true;
+    }
     std::ifstream file(path);
     if (!file.is_open()) {
         return setError(errorMessage, "Could not open import file '" + path.string() + "'.");
@@ -449,6 +464,33 @@ bool resolveImportPath(const std::string& spec,
                         "Could not resolve import " + spec + " from '" + importerPath.string() + "'.");
     }
 
+    // Try resolving via local/ancestor uranium.dep file
+    std::filesystem::path currentDir = importerPath.parent_path();
+    for (;;) {
+        std::filesystem::path depFile = currentDir / "uranium.dep";
+        if (std::filesystem::exists(depFile)) {
+            std::ifstream file(depFile);
+            std::string line;
+            while (std::getline(file, line)) {
+                std::size_t eq = line.find('=');
+                if (eq != std::string::npos) {
+                    std::string pkgName = line.substr(0, eq);
+                    std::string pkgPath = line.substr(eq + 1);
+                    if (pkgName == spec) {
+                        if (assignIfExists(pkgPath)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        std::filesystem::path parent = currentDir.parent_path();
+        if (parent == currentDir) {
+            break;
+        }
+        currentDir = parent;
+    }
+
     bool resolvedPackageImport = false;
     if (!tryResolveInstalledPackageImport(spec, importerPath, workingDirectory,
                                           &resolvedPackageImport, resolvedPath, errorMessage)) {
@@ -491,22 +533,57 @@ bool resolveImportPath(const std::string& spec,
     appendSearchRoot(workingDirectory);
     appendAncestorRoots(importerPath.parent_path());
 
+    appendSearchRoot(workingDirectory);
+    appendAncestorRoots(importerPath.parent_path());
+
+    // Resolve global libraries from the compiler's location
+    std::filesystem::path exeDir = std::filesystem::current_path();
+    #ifdef _WIN32
+    wchar_t path[MAX_PATH];
+    if (GetModuleFileNameW(NULL, path, MAX_PATH) > 0) {
+        exeDir = std::filesystem::path(path).parent_path();
+    }
+    #else
+    char path[1024];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path)-1);
+    if (len != -1) {
+        path[len] = '\0';
+        exeDir = std::filesystem::path(path).parent_path();
+    }
+    #endif
+    appendSearchRoot(exeDir);
+
     for (const std::filesystem::path& root : searchRoots) {
         if (!directoryExists(root / "urlib")) {
             continue;
         }
 
+        // 1. Check standard urlib
         std::filesystem::path candidate = root / "urlib" / spec;
         if (candidate.extension().empty()) {
             candidate += ".ur";
         }
-
         if (assignIfExists(candidate)) {
             return true;
         }
 
         std::filesystem::path indexCandidate = root / "urlib" / spec / "index.ur";
         if (assignIfExists(indexCandidate)) {
+            return true;
+        }
+
+        // 2. Check urlib/third_party
+        std::filesystem::path tpCandidate = root / "urlib" / "third_party" / spec;
+        if (tpCandidate.extension().empty()) {
+            if (assignIfExists(tpCandidate.string() + ".ur")) return true;
+            if (assignIfExists(tpCandidate.string() + ".ura")) return true;
+            if (assignIfExists(tpCandidate.string() + ".urc")) return true;
+        } else {
+            if (assignIfExists(tpCandidate)) return true;
+        }
+
+        std::filesystem::path tpIndexCandidate = root / "urlib" / "third_party" / spec / "index.ur";
+        if (assignIfExists(tpIndexCandidate)) {
             return true;
         }
     }
@@ -557,36 +634,6 @@ std::string moduleDefaultAlias(const std::filesystem::path& resolvedPath) {
         stem = resolvedPath.parent_path().filename().string();
     }
     return stem;
-}
-
-bool tryParseDeclarationName(const std::string& trimmed,
-                             const std::string& keyword,
-                             std::string* name) {
-    if (trimmed.rfind(keyword, 0) != 0) {
-        return false;
-    }
-
-    if (trimmed.size() == keyword.size() || !std::isspace(static_cast<unsigned char>(trimmed[keyword.size()]))) {
-        return false;
-    }
-
-    std::size_t index = keyword.size();
-    while (index < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[index]))) {
-        index++;
-    }
-
-    if (index >= trimmed.size() || !isIdentifierStart(trimmed[index])) {
-        return false;
-    }
-
-    std::size_t start = index;
-    index++;
-    while (index < trimmed.size() && isIdentifierPart(trimmed[index])) {
-        index++;
-    }
-
-    *name = trimmed.substr(start, index - start);
-    return true;
 }
 
 bool parseDeclarationLine(const std::string& line,
@@ -875,7 +922,12 @@ bool processModule(const std::filesystem::path& filePath,
     }
 
     if (activeModules->find(canonicalKey) != activeModules->end()) {
-        return setError(errorMessage, "Cyclic import detected at '" + canonicalKey + "'.");
+        std::string cycleMsg = "Circular import detected: ";
+        for (const auto& mod : *activeModules) {
+            cycleMsg += std::filesystem::path(mod).filename().string() + " -> ";
+        }
+        cycleMsg += filePath.filename().string();
+        return setError(errorMessage, cycleMsg);
     }
 
     activeModules->insert(canonicalKey);

@@ -1,5 +1,7 @@
 #include "vm.h"
+#include "common.h"
 #include "compiler.h"
+#include "lexer.h"
 #include "godot_native.h"
 #include "http_native.h"
 #include "gui_native.h"
@@ -13,6 +15,7 @@
 #include "db_native.h"
 #include "thread_native.h"
 #include "type_system.h"
+#include "ucpapi_native.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -26,6 +29,34 @@
 #include <thread>
 
 namespace {
+
+int levenshteinDistance(const std::string& s1, const std::string& s2) {
+    int len1 = static_cast<int>(s1.size());
+    int len2 = static_cast<int>(s2.size());
+    std::vector<std::vector<int>> d(len1 + 1, std::vector<int>(len2 + 1));
+    for (int i = 0; i <= len1; ++i) d[i][0] = i;
+    for (int j = 0; j <= len2; ++j) d[0][j] = j;
+    for (int i = 1; i <= len1; ++i) {
+        for (int j = 1; j <= len2; ++j) {
+            int cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
+            d[i][j] = std::min({d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost});
+        }
+    }
+    return d[len1][len2];
+}
+
+std::string findClosestGlobal(const std::string& name, const std::unordered_map<std::string, Value>& globals) {
+    std::string closest = "";
+    int minDistance = 3; // Only suggest if distance <= 2
+    for (const auto& pair : globals) {
+        int dist = levenshteinDistance(name, pair.first);
+        if (dist < minDistance) {
+            minDistance = dist;
+            closest = pair.first;
+        }
+    }
+    return closest;
+}
 
 VM* activeVm = nullptr;
 
@@ -120,7 +151,7 @@ bool ensureArgCount(int argCount, int expectedCount, std::string* errorMessage) 
 
 bool ensureNumber(const Value& value, const std::string& functionName,
                   int index, std::string* errorMessage) {
-    if (value.isNumber()) {
+    if (value.isNumber() || value.isInt()) {
         return true;
     }
 
@@ -189,7 +220,7 @@ bool ensureWholeNumber(const Value& value, const std::string& functionName,
         return false;
     }
 
-    double numericValue = value.asNumber();
+    double numericValue = value.isInt() ? static_cast<double>(value.asInt()) : value.asNumber();
     if (!std::isfinite(numericValue) || std::trunc(numericValue) != numericValue) {
         if (errorMessage != nullptr) {
             *errorMessage = functionName + " expects argument " + std::to_string(index + 1) +
@@ -202,6 +233,9 @@ bool ensureWholeNumber(const Value& value, const std::string& functionName,
 }
 
 long long asWholeNumber(const Value& value) {
+    if (value.isInt()) {
+        return value.asInt();
+    }
     return static_cast<long long>(value.asNumber());
 }
 
@@ -385,14 +419,20 @@ bool valueToMapKey(const Value& value, const std::string& context,
 bool valueToArrayIndex(const Value& value, std::size_t size, bool allowEnd,
                        const std::string& context, std::size_t* index,
                        std::string* errorMessage) {
-    if (!value.isNumber()) {
+    if (!value.isNumber() && !value.isInt()) {
         if (errorMessage != nullptr) {
             *errorMessage = context + " expects a numeric index.";
         }
         return false;
     }
 
-    double numericIndex = value.asNumber();
+    double numericIndex = 0.0;
+    if (value.isInt()) {
+        numericIndex = static_cast<double>(value.asInt());
+    } else {
+        numericIndex = value.asNumber();
+    }
+
     if (!std::isfinite(numericIndex) || std::trunc(numericIndex) != numericIndex) {
         if (errorMessage != nullptr) {
             *errorMessage = context + " expects a whole-number index.";
@@ -1158,6 +1198,8 @@ Value nativeTypeOf(int argCount, const Value* args, std::string* errorMessage) {
             return Value::stringValue("nil");
         case VAL_BOOL:
             return Value::stringValue("bool");
+        case VAL_INT:
+            return Value::stringValue("int");
         case VAL_NUMBER:
             return Value::stringValue("number");
         case VAL_STRING:
@@ -2521,6 +2563,12 @@ ClosurePtr findMethod(const ClassPtr& klass, const std::string& name) {
 
 bool getPropertyValue(const Value& receiver, const std::string& property,
                       Value* result, std::string* errorMessage) {
+    if (receiver.isNil()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "NullPointerError: Cannot access property '" + property + "' on nil.";
+        }
+        return false;
+    }
     if (receiver.isInstance()) {
         const InstancePtr& instance = receiver.asInstance();
         if (instance == nullptr) {
@@ -2623,6 +2671,12 @@ bool getPropertyValue(const Value& receiver, const std::string& property,
 
 bool setPropertyValue(const Value& receiver, const std::string& property, const Value& assignedValue,
                       std::string* errorMessage) {
+    if (receiver.isNil()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "NullPointerError: Cannot assign property '" + property + "' on nil.";
+        }
+        return false;
+    }
     if (receiver.isInstance()) {
         const InstancePtr& instance = receiver.asInstance();
         if (instance == nullptr) {
@@ -2667,7 +2721,7 @@ VM::VM()
       fastPathUnsupportedCount(0),
       nativeJitCompiledCount(0),
       bytecodeFastPathCompiledCount(0),
-      debugTraceEnabled(false) {
+      debugTraceEnabled(g_vmDebugMode) {
     resetScheduler();
     registerStandardLibrary();
 }
@@ -2736,6 +2790,11 @@ bool VM::ensureTaskStackCapacity(TaskPtr task, std::size_t neededSlots) {
 bool VM::ensureFrameCapacity(TaskPtr task, int neededCount) {
     if (task == nullptr) {
         runtimeError("Missing task frame stack.");
+        return false;
+    }
+
+    if (g_maxFrames > 0 && neededCount > g_maxFrames) {
+        runtimeError("Maximum call depth exceeded (limit: " + std::to_string(g_maxFrames) + "). Use --re to increase.");
         return false;
     }
 
@@ -3063,6 +3122,12 @@ void VM::registerStandardLibrary() {
     defineNative("threadWorkerResult", 1, nativeThreadWorkerResult);
     defineNative("threadWorkerError", 1, nativeThreadWorkerError);
     defineNative("threadWorkerWait", 1, nativeThreadWorkerWait);
+    
+    // UCPAPI Native bindings
+    defineNative("ucpapiLoad", 1, nativeUcpLoad);
+    defineNative("ucpapiUnload", 1, nativeUcpUnload);
+    defineNative("ucpapiRun", 3, nativeUcpRun);
+    defineNative("ucpapiCreateType", 3, nativeUcpCreateType);
 
     defineNumberConstant("PI", 3.14159265358979323846);
     defineNumberConstant("TAU", 6.28318530717958647692);
@@ -3424,11 +3489,16 @@ std::string VM::buildTaskTrace(TaskPtr task, const std::string& message) const {
             continue;
         }
 
-        trace += "\n[line " + std::to_string(frame.function->chunk.lines[instruction]) + "] in ";
+        int lineNum = frame.function->chunk.lines[instruction];
+        trace += "\n[line " + std::to_string(lineNum) + "] in ";
         if (frame.function->name.empty()) {
             trace += "script";
         } else {
             trace += frame.function->name + "()";
+        }
+        std::string sourceLine = getSourceLine(lineNum);
+        if (!sourceLine.empty()) {
+            trace += "\n    | " + sourceLine;
         }
     }
 
@@ -3474,7 +3544,9 @@ InterpretResult VM::interpret(const FunctionPtr& function) {
         return INTERPRET_COMPILE_ERROR;
     }
 
-    optimizeFunctionTree(function);
+    if (g_optimizerLevel > 0) {
+        optimizeFunctionTree(function, g_optimizerLevel);
+    }
 
     resetScheduler();
     ClosurePtr closure = uraniumHeap().allocateClosure(function);
@@ -3492,7 +3564,44 @@ InterpretResult VM::interpret(const FunctionPtr& function) {
     enqueueReadyTask(rootTask);
     maybeCollectGarbage();
 
-    return run();
+    InterpretResult result = run();
+    if (result != INTERPRET_OK) {
+        return result;
+    }
+
+    // Yürütme tamamlandıktan sonra global 'main' fonksiyonu veya sınıfı var mı kontrol et
+    auto it = globals.find("main");
+    if (it != globals.end()) {
+        Value mainValue = it->second;
+        if (mainValue.isClass() || mainValue.isFunction() || mainValue.isClosure()) {
+            // Yeni bir task oluşturup 'main' çağrısı yapalım
+            // Eğer class ise instantiate etmek için callValue kullanabiliriz
+            resetScheduler();
+            TaskPtr mainTask = createTaskHandle("main");
+            if (!ensureFrameCapacity(mainTask, 1)) {
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            mainTask->observed = true;
+            
+            // Stack'e callee'yi yerleştir
+            if (!ensureTaskStackCapacity(mainTask, 1)) {
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            mainTask->stack[0] = mainValue;
+            mainTask->stackTop = mainTask->stack.data() + 1;
+            
+            // callValue çağrısı ile frame hazırlığı yapalım
+            currentTask = mainTask;
+            if (!callValue(mainValue, 0)) {
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            
+            enqueueReadyTask(mainTask);
+            return run();
+        }
+    }
+
+    return INTERPRET_OK;
 }
 
 InterpretResult VM::interpret(const char* source) {
@@ -3624,7 +3733,9 @@ bool VM::maybeCompileFastPath(FunctionPtr function, bool force) {
         return false;
     }
 
-    optimizeFunctionTree(function);
+    if (g_optimizerLevel > 0) {
+        optimizeFunctionTree(function, g_optimizerLevel);
+    }
 
     if (function->fastPathStatus == FASTPATH_COMPILED && function->fastPath != nullptr) {
         return true;
@@ -4697,6 +4808,10 @@ bool VM::callValue(const Value& callee,
         return true;
     }
 
+    if (callee.isNil()) {
+        runtimeError("NullPointerError: Cannot call nil.");
+        return false;
+    }
     runtimeError("Only functions and classes can be called.");
     return false;
 }
@@ -4715,25 +4830,40 @@ InterpretResult VM::runTaskSlice() {
 #define READ_BYTE() (*frame->ip++)
 #define READ_CONSTANT() (frame->function->chunk.constants.values[READ_BYTE()])
 #define READ_SHORT() \
-    static_cast<uint16_t>((static_cast<uint16_t>(READ_BYTE()) << 8) | READ_BYTE())
+    (frame->ip += 2, \
+     static_cast<uint16_t>((static_cast<uint16_t>(frame->ip[-2]) << 8) | frame->ip[-1]))
 #define READ_CONSTANT_LONG() (frame->function->chunk.constants.values[READ_SHORT()])
 #define NUMERIC_BINARY_OP(op, message) \
     do { \
         Value b = pop(); \
         Value a = pop(); \
-        if (!a.isNumber() || !b.isNumber()) { \
+        if (a.isInt() && b.isInt()) { \
+            push(Value::intValue(a.asInt() op b.asInt())); \
+        } else if (a.isNumber() && b.isNumber()) { \
+            push(Value::numberValue(a.asNumber() op b.asNumber())); \
+        } else if (a.isInt() && b.isNumber()) { \
+            push(Value::numberValue(static_cast<double>(a.asInt()) op b.asNumber())); \
+        } else if (a.isNumber() && b.isInt()) { \
+            push(Value::numberValue(a.asNumber() op static_cast<double>(b.asInt()))); \
+        } else { \
             return runtimeError(message); \
         } \
-        push(Value::numberValue(a.asNumber() op b.asNumber())); \
     } while (false)
 #define NUMERIC_COMPARE_OP(op, message) \
     do { \
         Value b = pop(); \
         Value a = pop(); \
-        if (!a.isNumber() || !b.isNumber()) { \
+        if (a.isInt() && b.isInt()) { \
+            push(Value::boolValue(a.asInt() op b.asInt())); \
+        } else if (a.isNumber() && b.isNumber()) { \
+            push(Value::boolValue(a.asNumber() op b.asNumber())); \
+        } else if (a.isInt() && b.isNumber()) { \
+            push(Value::boolValue(static_cast<double>(a.asInt()) op b.asNumber())); \
+        } else if (a.isNumber() && b.isInt()) { \
+            push(Value::boolValue(a.asNumber() op static_cast<double>(b.asInt()))); \
+        } else { \
             return runtimeError(message); \
         } \
-        push(Value::boolValue(a.asNumber() op b.asNumber())); \
     } while (false)
 
     try {
@@ -5082,7 +5212,12 @@ InterpretResult VM::runTaskSlice() {
 
                     auto it = globals.find(name.asString());
                     if (it == globals.end()) {
-                        return runtimeError("Undefined variable '" + name.asString() + "'.");
+                        std::string suggest = findClosestGlobal(name.asString(), globals);
+                        std::string msg = "Undefined variable '" + name.asString() + "'.";
+                        if (!suggest.empty()) {
+                            msg += " Did you mean '" + suggest + "'?";
+                        }
+                        return runtimeError(msg);
                     }
 
                     push(it->second);
@@ -5096,7 +5231,12 @@ InterpretResult VM::runTaskSlice() {
 
                     auto it = globals.find(name.asString());
                     if (it == globals.end()) {
-                        return runtimeError("Undefined variable '" + name.asString() + "'.");
+                        std::string suggest = findClosestGlobal(name.asString(), globals);
+                        std::string msg = "Undefined variable '" + name.asString() + "'.";
+                        if (!suggest.empty()) {
+                            msg += " Did you mean '" + suggest + "'?";
+                        }
+                        return runtimeError(msg);
                     }
 
                     push(it->second);
@@ -5110,7 +5250,12 @@ InterpretResult VM::runTaskSlice() {
 
                     auto it = globals.find(name.asString());
                     if (it == globals.end()) {
-                        return runtimeError("Undefined variable '" + name.asString() + "'.");
+                        std::string suggest = findClosestGlobal(name.asString(), globals);
+                        std::string msg = "Undefined variable '" + name.asString() + "'.";
+                        if (!suggest.empty()) {
+                            msg += " Did you mean '" + suggest + "'?";
+                        }
+                        return runtimeError(msg);
                     }
 
                     if (constantGlobals.find(name.asString()) != constantGlobals.end()) {
@@ -5128,7 +5273,12 @@ InterpretResult VM::runTaskSlice() {
 
                     auto it = globals.find(name.asString());
                     if (it == globals.end()) {
-                        return runtimeError("Undefined variable '" + name.asString() + "'.");
+                        std::string suggest = findClosestGlobal(name.asString(), globals);
+                        std::string msg = "Undefined variable '" + name.asString() + "'.";
+                        if (!suggest.empty()) {
+                            msg += " Did you mean '" + suggest + "'?";
+                        }
+                        return runtimeError(msg);
                     }
 
                     if (constantGlobals.find(name.asString()) != constantGlobals.end()) {
@@ -5350,8 +5500,20 @@ InterpretResult VM::runTaskSlice() {
                     Value b = pop();
                     Value a = pop();
 
+                    if (a.isInt() && b.isInt()) {
+                        push(Value::intValue(a.asInt() + b.asInt()));
+                        break;
+                    }
                     if (a.isNumber() && b.isNumber()) {
                         push(Value::numberValue(a.asNumber() + b.asNumber()));
+                        break;
+                    }
+                    if (a.isInt() && b.isNumber()) {
+                        push(Value::numberValue(static_cast<double>(a.asInt()) + b.asNumber()));
+                        break;
+                    }
+                    if (a.isNumber() && b.isInt()) {
+                        push(Value::numberValue(a.asNumber() + static_cast<double>(b.asInt())));
                         break;
                     }
 
@@ -5360,7 +5522,7 @@ InterpretResult VM::runTaskSlice() {
                         break;
                     }
 
-                    return runtimeError("Operands to '+' must both be numbers or both be strings.");
+                    return runtimeError("Operands to '+' must both be numbers, integers, or strings.");
                 }
                 case OP_SUBTRACT:
                     NUMERIC_BINARY_OP(-, "Operands to '-' must be numbers.");
@@ -5371,6 +5533,63 @@ InterpretResult VM::runTaskSlice() {
                 case OP_DIVIDE:
                     NUMERIC_BINARY_OP(/, "Operands to '/' must be numbers.");
                     break;
+                case OP_MODULO: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (a.isInt() && b.isInt()) {
+                        if (b.asInt() == 0) return runtimeError("Division by zero.");
+                        push(Value::intValue(a.asInt() % b.asInt()));
+                    } else if ((a.isNumber() || a.isInt()) && (b.isNumber() || b.isInt())) {
+                        double da = a.isNumber() ? a.asNumber() : static_cast<double>(a.asInt());
+                        double db = b.isNumber() ? b.asNumber() : static_cast<double>(b.asInt());
+                        if (db == 0.0) return runtimeError("Division by zero.");
+                        push(Value::numberValue(std::fmod(da, db)));
+                    } else {
+                        return runtimeError("Operands to '%' must be numbers.");
+                    }
+                    break;
+                }
+                case OP_BITAND: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (!a.isInt() || !b.isInt()) return runtimeError("Bitwise operands must be integers.");
+                    push(Value::intValue(a.asInt() & b.asInt()));
+                    break;
+                }
+                case OP_BITOR: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (!a.isInt() || !b.isInt()) return runtimeError("Bitwise operands must be integers.");
+                    push(Value::intValue(a.asInt() | b.asInt()));
+                    break;
+                }
+                case OP_BITXOR: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (!a.isInt() || !b.isInt()) return runtimeError("Bitwise operands must be integers.");
+                    push(Value::intValue(a.asInt() ^ b.asInt()));
+                    break;
+                }
+                case OP_BITNOT: {
+                    Value a = pop();
+                    if (!a.isInt()) return runtimeError("Bitwise operand must be an integer.");
+                    push(Value::intValue(~a.asInt()));
+                    break;
+                }
+                case OP_SHL: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (!a.isInt() || !b.isInt()) return runtimeError("Shift operands must be integers.");
+                    push(Value::intValue(a.asInt() << b.asInt()));
+                    break;
+                }
+                case OP_SHR: {
+                    Value b = pop();
+                    Value a = pop();
+                    if (!a.isInt() || !b.isInt()) return runtimeError("Shift operands must be integers.");
+                    push(Value::intValue(a.asInt() >> b.asInt()));
+                    break;
+                }
                 case OP_NOT:
                     push(Value::boolValue(isFalsey(pop())));
                     break;
@@ -5409,11 +5628,86 @@ InterpretResult VM::runTaskSlice() {
                 }
                 case OP_NEGATE: {
                     Value value = pop();
-                    if (!value.isNumber()) {
+                    if (value.isInt()) {
+                        push(Value::intValue(-value.asInt()));
+                    } else if (value.isNumber()) {
+                        push(Value::numberValue(-value.asNumber()));
+                    } else {
                         return runtimeError("Operand to unary '-' must be a number.");
                     }
+                    break;
+                }
+                case OP_BREAKPOINT: {
+                    std::cout << "\n\033[1;33m--- DEBUGGER BREAKPOINT HIT ---\033[0m" << std::endl;
+                    if (frame->function) {
+                        int offset = static_cast<int>(frame->ip - frame->function->chunk.code.data());
+                        int line = frame->function->chunk.lines[offset];
+                        std::cout << "Location: " << (frame->function->name.empty() ? "<script>" : frame->function->name)
+                                  << " on line " << line << std::endl;
+                        std::cout << "Source: " << getSourceLine(line) << std::endl;
+                    }
 
-                    push(Value::numberValue(-value.asNumber()));
+                    bool debugging = true;
+                    while (debugging) {
+                        std::cout << "\033[1;36m(db) \033[0m";
+                        std::string cmd;
+                        if (!std::getline(std::cin, cmd)) {
+                            debugging = false;
+                            break;
+                        }
+                        if (!cmd.empty() && cmd.back() == '\r') {
+                            cmd.pop_back();
+                        }
+                        // Simple trim of leading/trailing spaces
+                        while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.front()))) {
+                            cmd.erase(cmd.begin());
+                        }
+                        while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.back()))) {
+                            cmd.pop_back();
+                        }
+                        if (cmd == "c" || cmd == "continue") {
+                            debugging = false;
+                        } else if (cmd == "bt" || cmd == "backtrace") {
+                            std::cout << "Stack Trace:" << std::endl;
+                            for (int i = frameCount - 1; i >= 0; --i) {
+                                const CallFrame& f = currentTask->frames[i];
+                                std::string name = f.function->name.empty() ? "<script>" : f.function->name;
+                                int off = static_cast<int>(f.ip - f.function->chunk.code.data());
+                                int ln = f.function->chunk.lines[off];
+                                std::cout << "  #" << i << " " << name << " at line " << ln << std::endl;
+                            }
+                        } else if (cmd.rfind("print ", 0) == 0) {
+                            std::string varName = cmd.substr(6);
+                            auto it = this->globals.find(varName);
+                            if (it != this->globals.end()) {
+                                std::cout << varName << " = ";
+                                printValue(it->second);
+                                std::cout << std::endl;
+                            } else {
+                                // Try local slots in current frame
+                                bool foundLocal = false;
+                                // We don't have local variable names at runtime directly, but we can print stack slots
+                                if (varName.rfind("slot", 0) == 0) {
+                                    try {
+                                        int slotIdx = std::stoi(varName.substr(4));
+                                        if (frame->slots + slotIdx < stackTop) {
+                                            std::cout << "slot " << slotIdx << " = ";
+                                            printValue(frame->slots[slotIdx]);
+                                            std::cout << std::endl;
+                                            foundLocal = true;
+                                        }
+                                    } catch (...) {}
+                                }
+                                if (!foundLocal) {
+                                    std::cout << "Variable '" << varName << "' not found in globals. (Hint: use 'slot0', 'slot1' to print stack slots)" << std::endl;
+                                }
+                            }
+                        } else if (cmd == "q" || cmd == "quit") {
+                            return INTERPRET_RUNTIME_ERROR;
+                        } else {
+                            std::cout << "Commands:\n  c, continue    Continue execution\n  bt, backtrace  Print call stack\n  print <name>   Print global variable or 'slot0', 'slot1'\n  q, quit        Terminate execution" << std::endl;
+                        }
+                    }
                     break;
                 }
                 case OP_PRINT: {

@@ -1,10 +1,19 @@
 #include "urc.h"
+#include "common.h"
 #include "heap.h"
 #include "object.h"
 #include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -20,6 +29,342 @@ bool setError(std::string* errorMessage, const std::string& message) {
         *errorMessage = message;
     }
     return false;
+}
+
+uint16_t readLe16(const std::vector<uint8_t>& bytes, std::size_t offset) {
+    return static_cast<uint16_t>(bytes[offset]) |
+           static_cast<uint16_t>(bytes[offset + 1] << 8);
+}
+
+uint32_t readLe32(const std::vector<uint8_t>& bytes, std::size_t offset) {
+    return static_cast<uint32_t>(bytes[offset]) |
+           (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+}
+
+void writeLe16(std::vector<uint8_t>* bytes, std::size_t offset, uint16_t value) {
+    (*bytes)[offset] = static_cast<uint8_t>(value & 0xff);
+    (*bytes)[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+}
+
+void writeLe32(std::vector<uint8_t>* bytes, std::size_t offset, uint32_t value) {
+    (*bytes)[offset] = static_cast<uint8_t>(value & 0xff);
+    (*bytes)[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    (*bytes)[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    (*bytes)[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xff);
+}
+
+struct IconImage {
+    uint8_t width = 0;
+    uint8_t height = 0;
+    uint8_t colorCount = 0;
+    uint16_t planes = 0;
+    uint16_t bitCount = 0;
+    std::vector<uint8_t> data;
+};
+
+bool readIconFile(const std::filesystem::path& iconPath,
+                  std::vector<IconImage>* images,
+                  std::string* errorMessage) {
+    std::ifstream stream(iconPath, std::ios::binary | std::ios::ate);
+    if (!stream.is_open()) {
+        return setError(errorMessage, "Could not open icon file '" + iconPath.string() + "'.");
+    }
+
+    std::streamoff fileSize = stream.tellg();
+    if (fileSize < 6 || fileSize > 32 * 1024 * 1024) {
+        return setError(errorMessage, "Invalid .ico file size: " + iconPath.string());
+    }
+
+    std::vector<uint8_t> bytes(static_cast<std::size_t>(fileSize));
+    stream.seekg(0);
+    stream.read(reinterpret_cast<char*>(bytes.data()), fileSize);
+    if (!stream.good()) {
+        return setError(errorMessage, "Could not read icon file '" + iconPath.string() + "'.");
+    }
+
+    uint16_t reserved = readLe16(bytes, 0);
+    uint16_t type = readLe16(bytes, 2);
+    uint16_t count = readLe16(bytes, 4);
+    if (reserved != 0 || type != 1 || count == 0) {
+        return setError(errorMessage, "Expected a Windows .ico icon file: " + iconPath.string());
+    }
+
+    std::size_t directorySize = 6 + static_cast<std::size_t>(count) * 16;
+    if (directorySize > bytes.size()) {
+        return setError(errorMessage, "Corrupt .ico directory: " + iconPath.string());
+    }
+
+    images->clear();
+    images->reserve(count);
+    for (uint16_t index = 0; index < count; ++index) {
+        std::size_t entry = 6 + static_cast<std::size_t>(index) * 16;
+        uint32_t imageSize = readLe32(bytes, entry + 8);
+        uint32_t imageOffset = readLe32(bytes, entry + 12);
+        if (imageSize == 0 || imageOffset > bytes.size() || imageSize > bytes.size() - imageOffset) {
+            return setError(errorMessage, "Corrupt .ico image data: " + iconPath.string());
+        }
+
+        IconImage image;
+        image.width = bytes[entry];
+        image.height = bytes[entry + 1];
+        image.colorCount = bytes[entry + 2];
+        image.planes = readLe16(bytes, entry + 4);
+        image.bitCount = readLe16(bytes, entry + 6);
+        image.data.assign(bytes.begin() + imageOffset, bytes.begin() + imageOffset + imageSize);
+        images->push_back(std::move(image));
+    }
+
+    return true;
+}
+
+bool applyExecutableIcon(const std::filesystem::path& executablePath,
+                         const std::filesystem::path& iconPath,
+                         std::string* errorMessage) {
+#ifdef _WIN32
+    std::vector<IconImage> images;
+    if (!readIconFile(iconPath, &images, errorMessage)) {
+        return false;
+    }
+
+    HANDLE update = BeginUpdateResourceW(executablePath.wstring().c_str(), FALSE);
+    if (update == nullptr) {
+        return setError(errorMessage, "Could not open executable resources for icon update. Windows error " +
+                                    std::to_string(GetLastError()) + ".");
+    }
+
+    WORD language = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL);
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        const IconImage& image = images[index];
+        WORD resourceId = static_cast<WORD>(index + 1);
+        if (!UpdateResourceW(update, MAKEINTRESOURCEW(3) /* RT_ICON */, MAKEINTRESOURCEW(resourceId), language,
+                             const_cast<uint8_t*>(image.data.data()),
+                             static_cast<DWORD>(image.data.size()))) {
+            DWORD error = GetLastError();
+            EndUpdateResourceW(update, TRUE);
+            return setError(errorMessage, "Could not write icon image resource. Windows error " +
+                                        std::to_string(error) + ".");
+        }
+    }
+
+    std::vector<uint8_t> group(6 + images.size() * 14, 0);
+    writeLe16(&group, 0, 0);
+    writeLe16(&group, 2, 1);
+    writeLe16(&group, 4, static_cast<uint16_t>(images.size()));
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        const IconImage& image = images[index];
+        std::size_t entry = 6 + index * 14;
+        group[entry] = image.width;
+        group[entry + 1] = image.height;
+        group[entry + 2] = image.colorCount;
+        group[entry + 3] = 0;
+        writeLe16(&group, entry + 4, image.planes);
+        writeLe16(&group, entry + 6, image.bitCount);
+        writeLe32(&group, entry + 8, static_cast<uint32_t>(image.data.size()));
+        writeLe16(&group, entry + 12, static_cast<uint16_t>(index + 1));
+    }
+
+    if (!UpdateResourceW(update, MAKEINTRESOURCEW(14) /* RT_GROUP_ICON */, MAKEINTRESOURCEW(1), language,
+                         group.data(), static_cast<DWORD>(group.size()))) {
+        DWORD error = GetLastError();
+        EndUpdateResourceW(update, TRUE);
+        return setError(errorMessage, "Could not write icon group resource. Windows error " +
+                                    std::to_string(error) + ".");
+    }
+
+    if (!EndUpdateResourceW(update, FALSE)) {
+        return setError(errorMessage, "Could not commit executable icon resources. Windows error " +
+                                    std::to_string(GetLastError()) + ".");
+    }
+    return true;
+#endif
+}
+
+struct ResourceNode {
+    std::wstring key;
+    uint16_t type = 1; // 1 = text, 0 = binary
+    std::vector<uint8_t> valueBytes;
+    std::vector<ResourceNode> children;
+
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> data;
+        // wLength placeholder (2 bytes)
+        data.push_back(0); data.push_back(0);
+        
+        // wValueLength (2 bytes)
+        uint16_t valLen = static_cast<uint16_t>(valueBytes.size());
+        if (type == 1 && valLen > 0) {
+            // for text type, wValueLength is in WCHARs, including null terminator
+            valLen = valLen / 2;
+        }
+        data.push_back(static_cast<uint8_t>(valLen & 0xFF));
+        data.push_back(static_cast<uint8_t>((valLen >> 8) & 0xFF));
+
+        // wType (2 bytes)
+        data.push_back(static_cast<uint8_t>(type & 0xFF));
+        data.push_back(static_cast<uint8_t>((type >> 8) & 0xFF));
+
+        // szKey (null-terminated WCHAR string)
+        for (wchar_t c : key) {
+            data.push_back(static_cast<uint8_t>(c & 0xFF));
+            data.push_back(static_cast<uint8_t>((c >> 8) & 0xFF));
+        }
+        data.push_back(0); data.push_back(0); // L'\0'
+
+        // align to 32-bit boundary
+        while (data.size() % 4 != 0) {
+            data.push_back(0);
+        }
+
+        // Value
+        if (!valueBytes.empty()) {
+            data.insert(data.end(), valueBytes.begin(), valueBytes.end());
+            // align to 32-bit boundary
+            while (data.size() % 4 != 0) {
+                data.push_back(0);
+            }
+        }
+
+        // Children
+        for (const auto& child : children) {
+            std::vector<uint8_t> childBytes = child.serialize();
+            data.insert(data.end(), childBytes.begin(), childBytes.end());
+        }
+
+        // Write total length
+        uint16_t totalLen = static_cast<uint16_t>(data.size());
+        data[0] = static_cast<uint8_t>(totalLen & 0xFF);
+        data[1] = static_cast<uint8_t>((totalLen >> 8) & 0xFF);
+
+        return data;
+    }
+};
+
+static void parseVersionString(const std::wstring& verStr, uint32_t* ms, uint32_t* ls) {
+    uint32_t major = 1, minor = 0, patch = 0, build = 0;
+    if (std::swscanf(verStr.c_str(), L"%u.%u.%u.%u", &major, &minor, &patch, &build) < 1) {
+        major = 1; minor = 0; patch = 0; build = 0;
+        std::swscanf(verStr.c_str(), L"%u.%u.%u", &major, &minor, &patch);
+    }
+    *ms = (major << 16) | minor;
+    *ls = (patch << 16) | build;
+}
+
+static ResourceNode createStringNode(const std::wstring& name, const std::wstring& val) {
+    ResourceNode node;
+    node.key = name;
+    node.type = 1;
+    for (wchar_t c : val) {
+        node.valueBytes.push_back(static_cast<uint8_t>(c & 0xFF));
+        node.valueBytes.push_back(static_cast<uint8_t>((c >> 8) & 0xFF));
+    }
+    node.valueBytes.push_back(0);
+    node.valueBytes.push_back(0);
+    return node;
+}
+
+bool applyExecutableVersionInfo(const std::filesystem::path& executablePath,
+                                const std::wstring& companyName,
+                                const std::wstring& fileDescription,
+                                const std::wstring& fileVersion,
+                                const std::wstring& productName,
+                                const std::wstring& productVersion,
+                                const std::wstring& originalFilename,
+                                std::string* errorMessage) {
+#ifdef _WIN32
+    ResourceNode root;
+    root.key = L"VS_VERSION_INFO";
+    root.type = 0;
+
+    VS_FIXEDFILEINFO fixed = {};
+    fixed.dwSignature = 0xFEEF04BD;
+    fixed.dwStrucVersion = 0x00010000;
+    
+    uint32_t fileMS = 0, fileLS = 0;
+    parseVersionString(fileVersion, &fileMS, &fileLS);
+    fixed.dwFileVersionMS = fileMS;
+    fixed.dwFileVersionLS = fileLS;
+
+    uint32_t prodMS = 0, prodLS = 0;
+    parseVersionString(productVersion, &prodMS, &prodLS);
+    fixed.dwProductVersionMS = prodMS;
+    fixed.dwProductVersionLS = prodLS;
+
+    fixed.dwFileFlagsMask = 0x3F;
+    fixed.dwFileFlags = 0;
+    fixed.dwFileOS = 0x00040004;
+    fixed.dwFileType = 0x00000001;
+    fixed.dwFileSubtype = 0;
+
+    uint8_t* fixedPtr = reinterpret_cast<uint8_t*>(&fixed);
+    root.valueBytes.assign(fixedPtr, fixedPtr + sizeof(fixed));
+
+    ResourceNode stringFileInfo;
+    stringFileInfo.key = L"StringFileInfo";
+    stringFileInfo.type = 1;
+
+    ResourceNode langBlock;
+    langBlock.key = L"040904B0";
+    langBlock.type = 1;
+
+    langBlock.children.push_back(createStringNode(L"CompanyName", companyName));
+    langBlock.children.push_back(createStringNode(L"FileDescription", fileDescription));
+    langBlock.children.push_back(createStringNode(L"FileVersion", fileVersion));
+    langBlock.children.push_back(createStringNode(L"ProductName", productName));
+    langBlock.children.push_back(createStringNode(L"ProductVersion", productVersion));
+    langBlock.children.push_back(createStringNode(L"OriginalFilename", originalFilename));
+
+    stringFileInfo.children.push_back(langBlock);
+    root.children.push_back(stringFileInfo);
+
+    ResourceNode varFileInfo;
+    varFileInfo.key = L"VarFileInfo";
+    varFileInfo.type = 1;
+
+    ResourceNode translation;
+    translation.key = L"Translation";
+    translation.type = 0;
+    translation.valueBytes.push_back(0x09);
+    translation.valueBytes.push_back(0x04);
+    translation.valueBytes.push_back(0xB0);
+    translation.valueBytes.push_back(0x04);
+
+    varFileInfo.children.push_back(translation);
+    root.children.push_back(varFileInfo);
+
+    std::vector<uint8_t> serialized = root.serialize();
+
+    HANDLE update = BeginUpdateResourceW(executablePath.wstring().c_str(), FALSE);
+    if (update == nullptr) {
+        return setError(errorMessage, "Could not open executable resources for version update. Windows error " +
+                                    std::to_string(GetLastError()) + ".");
+    }
+
+    WORD language = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL);
+    if (!UpdateResourceW(update, MAKEINTRESOURCEW(16) /* RT_VERSION */, MAKEINTRESOURCEW(1), language,
+                         serialized.data(), static_cast<DWORD>(serialized.size()))) {
+        DWORD error = GetLastError();
+        EndUpdateResourceW(update, TRUE);
+        return setError(errorMessage, "Could not write version resource. Windows error " +
+                                    std::to_string(error) + ".");
+    }
+
+    if (!EndUpdateResourceW(update, FALSE)) {
+        return setError(errorMessage, "Could not commit executable version resources. Windows error " +
+                                    std::to_string(GetLastError()) + ".");
+    }
+    return true;
+#else
+    (void)executablePath;
+    (void)companyName;
+    (void)fileDescription;
+    (void)fileVersion;
+    (void)productName;
+    (void)productVersion;
+    (void)originalFilename;
+    return setError(errorMessage, "Executable version editing is only supported on Windows builds.");
+#endif
 }
 
 template <typename T>
@@ -163,6 +508,8 @@ bool writeValue(std::ostream& stream, const Value& value, std::string* errorMess
         }
         case VAL_NUMBER:
             return writePod(stream, value.number, errorMessage);
+        case VAL_INT:
+            return writePod(stream, value.integer, errorMessage);
         case VAL_STRING:
             return writeString(stream, value.string, errorMessage);
         case VAL_FUNCTION:
@@ -266,6 +613,14 @@ bool readValue(std::istream& stream,
                 return false;
             }
             *value = Value::numberValue(number);
+            return true;
+        }
+        case VAL_INT: {
+            int64_t integer;
+            if (!readPod(stream, &integer, errorMessage)) {
+                return false;
+            }
+            *value = Value::intValue(integer);
             return true;
         }
         case VAL_STRING: {
@@ -599,6 +954,7 @@ bool writeUraFile(const FunctionPtr& function,
                   const std::filesystem::path& path,
                   const std::string& manifestText,
                   const std::string& entryPath,
+                  const std::string& sourceText,
                   std::string* errorMessage) {
     std::error_code errorCode;
     std::filesystem::create_directories(path.parent_path(), errorCode);
@@ -612,13 +968,14 @@ bool writeUraFile(const FunctionPtr& function,
         return setError(errorMessage, "Could not open '" + path.string() + "' for writing.");
     }
 
-    return writeUraStream(function, stream, manifestText, entryPath, errorMessage);
+    return writeUraStream(function, stream, manifestText, entryPath, sourceText, errorMessage);
 }
 
 bool writeUraStream(const FunctionPtr& function,
                     std::ostream& stream,
                     const std::string& manifestText,
                     const std::string& entryPath,
+                    const std::string& sourceText,
                     std::string* errorMessage) {
     std::ostringstream payloadStream(std::ios::binary | std::ios::out);
     if (!writeUrcStream(function, payloadStream, errorMessage)) {
@@ -633,6 +990,7 @@ bool writeUraStream(const FunctionPtr& function,
 
     if (!writeString(stream, manifestText, errorMessage) ||
         !writeString(stream, entryPath, errorMessage) ||
+        !writeString(stream, sourceText, errorMessage) ||
         !writeBlob(stream, payload, errorMessage)) {
         return false;
     }
@@ -644,19 +1002,21 @@ bool readUraFile(const std::filesystem::path& path,
                  FunctionPtr* function,
                  std::string* manifestText,
                  std::string* entryPath,
+                 std::string* sourceText,
                  std::string* errorMessage) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream.is_open()) {
         return setError(errorMessage, "Could not open '" + path.string() + "'.");
     }
 
-    return readUraStream(stream, function, manifestText, entryPath, errorMessage);
+    return readUraStream(stream, function, manifestText, entryPath, sourceText, errorMessage);
 }
 
 bool readUraStream(std::istream& stream,
                    FunctionPtr* function,
                    std::string* manifestText,
                    std::string* entryPath,
+                   std::string* sourceText,
                    std::string* errorMessage) {
     char magic[sizeof(kUraMagicV1)] = {};
     stream.read(magic, sizeof(magic));
@@ -672,9 +1032,11 @@ bool readUraStream(std::istream& stream,
 
     std::string manifest;
     std::string entry;
+    std::string source;
     std::string payload;
     if (!readString(stream, &manifest, errorMessage) ||
         !readString(stream, &entry, errorMessage) ||
+        !readString(stream, &source, errorMessage) ||
         !readBlob(stream, &payload, errorMessage)) {
         return false;
     }
@@ -692,12 +1054,17 @@ bool readUraStream(std::istream& stream,
         *entryPath = entry;
     }
 
+    if (sourceText != nullptr) {
+        *sourceText = source;
+    }
+
     return true;
 }
 
 bool writeEmbeddedAotBinary(const std::filesystem::path& runtimeExecutablePath,
                             const std::string& payload,
                             const std::filesystem::path& outputPath,
+                            const std::filesystem::path& iconPath,
                             std::string* errorMessage) {
     std::ifstream runtimeStream(runtimeExecutablePath, std::ios::binary);
     if (!runtimeStream.is_open()) {
@@ -740,6 +1107,29 @@ bool writeEmbeddedAotBinary(const std::filesystem::path& runtimeExecutablePath,
     uint64_t payloadSize = static_cast<uint64_t>(payload.size());
     if (!writePod(outputStream, payloadSize, errorMessage)) {
         return false;
+    }
+
+    outputStream.close();
+    if (!outputStream.good()) {
+        return setError(errorMessage, "Failed while closing embedded AOT output file.");
+    }
+
+    if (!iconPath.empty() && !applyExecutableIcon(outputPath, iconPath, errorMessage)) {
+        return false;
+    }
+
+    if (!g_compileCompanyName.empty() || !g_compileFileDescription.empty() || !g_compileFileVersion.empty() || !g_compileProductName.empty()) {
+        std::wstring origFilename = outputPath.filename().wstring();
+        if (!applyExecutableVersionInfo(outputPath,
+                                        g_compileCompanyName,
+                                        g_compileFileDescription,
+                                        g_compileFileVersion.empty() ? L"1.0.0.0" : g_compileFileVersion,
+                                        g_compileProductName,
+                                        g_compileProductVersion.empty() ? (g_compileFileVersion.empty() ? L"1.0.0.0" : g_compileFileVersion) : g_compileProductVersion,
+                                        origFilename,
+                                        errorMessage)) {
+            return false;
+        }
     }
 
     return true;

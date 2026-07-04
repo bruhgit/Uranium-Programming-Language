@@ -48,7 +48,6 @@ bool ensureArgCount(int argCount, int expectedCount, std::string* errorMessage) 
     if (argCount == expectedCount) {
         return true;
     }
-
     return setError(errorMessage,
                     "Expected " + std::to_string(expectedCount) + " argument(s) but got " +
                         std::to_string(argCount) + ".");
@@ -61,7 +60,6 @@ bool ensureString(const Value& value,
     if (value.isString()) {
         return true;
     }
-
     return setError(errorMessage,
                     functionName + " expects argument " + std::to_string(index + 1) +
                         " to be a string.");
@@ -71,23 +69,25 @@ bool ensureWholeNumber(const Value& value,
                        const std::string& functionName,
                        int index,
                        std::string* errorMessage) {
-    if (!value.isNumber()) {
+    if (!value.isNumber() && !value.isInt()) {
         return setError(errorMessage,
                         functionName + " expects argument " + std::to_string(index + 1) +
                             " to be a whole number.");
     }
 
-    double numericValue = value.asNumber();
+    double numericValue = value.isInt() ? static_cast<double>(value.asInt()) : value.asNumber();
     if (!std::isfinite(numericValue) || std::trunc(numericValue) != numericValue) {
         return setError(errorMessage,
                         functionName + " expects argument " + std::to_string(index + 1) +
                             " to be a whole number.");
     }
-
     return true;
 }
 
 long long asWholeNumber(const Value& value) {
+    if (value.isInt()) {
+        return value.asInt();
+    }
     return static_cast<long long>(value.asNumber());
 }
 

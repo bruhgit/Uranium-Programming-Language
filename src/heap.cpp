@@ -1,4 +1,5 @@
 #include "heap.h"
+#include "common.h"
 #include <algorithm>
 #include <new>
 
@@ -11,6 +12,10 @@ T* linkObject(HeapObject** objects,
               std::size_t* youngObjects,
               std::size_t* youngBytesAllocated,
               T* object) {
+    if (g_maxHeapBytes > 0 && (*bytesAllocated) + sizeof(T) > g_maxHeapBytes) {
+        std::cerr << "Runtime Error: Heap limit of " << g_maxHeapBytes << " bytes exceeded." << std::endl;
+        std::exit(70);
+    }
     static_cast<HeapObject*>(object)->next = *objects;
     *objects = object;
     (*liveObjects)++;
@@ -30,8 +35,8 @@ Heap::Heap()
       oldObjects(0),
       youngBytesAllocated(0),
       oldBytesAllocated(0),
-      nextYoungCollectionBytes(64 * 1024),
-      nextFullCollectionBytes(512 * 1024),
+      nextYoungCollectionBytes(g_baseYoungBytes),
+      nextFullCollectionBytes(g_baseFullBytes),
       totalCollections(0),
       minorCollections(0),
       fullCollections(0),
@@ -629,8 +634,8 @@ void Heap::refreshAccounting() {
     youngObjects = youngCount;
     oldObjects = oldCount;
     liveObjects = youngCount + oldCount;
-    nextYoungCollectionBytes = std::max<std::size_t>(64 * 1024, youngBytesAllocated * 2 + 4096);
-    nextFullCollectionBytes = std::max<std::size_t>(512 * 1024, oldBytesAllocated * 2 + 65536);
+    nextYoungCollectionBytes = std::max<std::size_t>(g_baseYoungBytes, youngBytesAllocated * 2 + 4096);
+    nextFullCollectionBytes = std::max<std::size_t>(g_baseFullBytes, oldBytesAllocated * 2 + 65536);
 }
 
 Heap& uraniumHeap() {

@@ -129,6 +129,12 @@ std::string valueToStringInternal(const Value& value,
         return stream.str();
     }
 
+    if (value.isInt()) {
+        std::ostringstream stream;
+        stream << value.asInt();
+        return stream.str();
+    }
+
     if (value.isFunction()) {
         FunctionPtr function = value.asFunction();
         if (function == nullptr || function->name.empty()) {
@@ -196,6 +202,8 @@ bool valuesEqual(const Value& left, const Value& right) {
             return left.asBool() == right.asBool();
         case VAL_NUMBER:
             return left.asNumber() == right.asNumber();
+        case VAL_INT:
+            return left.asInt() == right.asInt();
         case VAL_STRING:
             return left.asString() == right.asString();
         case VAL_FUNCTION:

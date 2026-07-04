@@ -3,6 +3,7 @@
 #include <cstring>
 
 struct Lexer {
+    const char* originalSource;
     const char* start;
     const char* current;
     const char* lineStart;
@@ -12,6 +13,7 @@ struct Lexer {
 static Lexer lexer;
 
 void initLexer(const char* source) {
+    lexer.originalSource = source;
     lexer.start = source;
     lexer.current = source;
     lexer.lineStart = source;
@@ -150,7 +152,15 @@ static TokenType identifierType() {
             }
             break;
         case 'd':
-            return checkKeyword(1, 6, "efault", TOKEN_DEFAULT);
+            if (lexer.current - lexer.start > 1) {
+                switch (lexer.start[1]) {
+                    case 'e':
+                        return checkKeyword(2, 6, "bugger", TOKEN_DEBUGGER);
+                    default:
+                        return checkKeyword(1, 6, "efault", TOKEN_DEFAULT);
+                }
+            }
+            break;
         case 'e':
             if (lexer.current - lexer.start > 1) {
                 switch (lexer.start[1]) {
@@ -321,6 +331,11 @@ Token scanToken() {
         case '.': return makeToken(TOKEN_DOT);
         case '?': return makeToken(TOKEN_QUESTION);
         case ';': return makeToken(TOKEN_SEMICOLON);
+        case '%': return makeToken(TOKEN_PERCENT);
+        case '&': return makeToken(TOKEN_AMPERSAND);
+        case '|': return makeToken(TOKEN_PIPE);
+        case '^': return makeToken(TOKEN_CARET);
+        case '~': return makeToken(TOKEN_TILDE);
         case '+': return makeToken(TOKEN_PLUS);
         case '-': return makeToken(TOKEN_MINUS);
         case '*': return makeToken(TOKEN_STAR);
@@ -330,8 +345,10 @@ Token scanToken() {
         case '=':
             return makeToken(matchChar('=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL);
         case '<':
+            if (matchChar('<')) return makeToken(TOKEN_LESS_LESS);
             return makeToken(matchChar('=') ? TOKEN_LESS_EQUAL : TOKEN_LESS);
         case '>':
+            if (matchChar('>')) return makeToken(TOKEN_GREATER_GREATER);
             return makeToken(matchChar('=') ? TOKEN_GREATER_EQUAL : TOKEN_GREATER);
         case '"':
             return string();
@@ -356,6 +373,13 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_MINUS: return "MINUS";
         case TOKEN_STAR: return "STAR";
         case TOKEN_SLASH: return "SLASH";
+        case TOKEN_PERCENT: return "PERCENT";
+        case TOKEN_AMPERSAND: return "AMPERSAND";
+        case TOKEN_PIPE: return "PIPE";
+        case TOKEN_CARET: return "CARET";
+        case TOKEN_TILDE: return "TILDE";
+        case TOKEN_LESS_LESS: return "LESS_LESS";
+        case TOKEN_GREATER_GREATER: return "GREATER_GREATER";
         case TOKEN_BANG: return "BANG";
         case TOKEN_EQUAL: return "EQUAL";
         case TOKEN_GREATER: return "GREATER";
@@ -379,6 +403,7 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_LET: return "LET";
         case TOKEN_CONST: return "CONST";
         case TOKEN_CONTINUE: return "CONTINUE";
+        case TOKEN_DEBUGGER: return "DEBUGGER";
         case TOKEN_DEFAULT: return "DEFAULT";
         case TOKEN_ELSE: return "ELSE";
         case TOKEN_FALSE: return "FALSE";
@@ -406,4 +431,22 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_EOF: return "EOF";
         default: return "UNKNOWN";
     }
+}
+
+std::string getSourceLine(int line) {
+    if (lexer.originalSource == nullptr) return "";
+    const char* p = lexer.originalSource;
+    int currentLine = 1;
+    while (*p != '\0' && currentLine < line) {
+        if (*p == '\n') {
+            currentLine++;
+        }
+        p++;
+    }
+    if (*p == '\0') return "";
+    const char* lineStart = p;
+    while (*p != '\0' && *p != '\n' && *p != '\r') {
+        p++;
+    }
+    return std::string(lineStart, p);
 }

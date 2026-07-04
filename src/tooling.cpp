@@ -1060,12 +1060,41 @@ bool formatUraniumSource(const std::string& source,
     return formatUraniumSourceImpl(source, std::max(2, indentSize), formattedSource);
 }
 
+static std::vector<ToolDiagnostic>* g_activeDiagnostics = nullptr;
+
+static void compileErrorListener(const std::string& message, int line, int column, int length) {
+    if (g_activeDiagnostics != nullptr) {
+        ToolDiagnostic diag;
+        diag.line = line;
+        diag.column = column;
+        diag.endLine = line;
+        diag.endColumn = column + (length > 0 ? length : 1);
+        diag.severity = TOOL_SEVERITY_ERROR;
+        diag.code = "compiler-error";
+        diag.message = message;
+        g_activeDiagnostics->push_back(diag);
+    }
+}
+
 void lintUraniumSource(const std::string& source,
                        std::vector<ToolDiagnostic>* diagnostics) {
     diagnostics->clear();
+    
+    // 1. Run style, lexical, and brace linter
     lintStyleIssues(source, diagnostics);
     lintLexicalIssues(source, diagnostics);
     lintBraceBalance(source, diagnostics);
+
+    // 2. Run compiler parser & type checker to capture compiler errors
+    g_activeDiagnostics = diagnostics;
+    g_compileErrorCallback = compileErrorListener;
+    
+    FunctionPtr ignored = nullptr;
+    compile(source.c_str(), &ignored);
+    
+    g_compileErrorCallback = nullptr;
+    g_activeDiagnostics = nullptr;
+
     sortDiagnostics(diagnostics);
 }
 
@@ -2520,7 +2549,7 @@ int runLspServer(const std::filesystem::path& executablePath) {
                     const std::vector<std::pair<std::string, int>> keywords = {
                         {"async", 14}, {"await", 14}, {"break", 14}, {"case", 14},
                         {"catch", 14}, {"class", 14}, {"const", 14}, {"continue", 14},
-                        {"default", 14}, {"elif", 14}, {"else", 14}, {"enum", 14},
+                        {"debugger", 14}, {"default", 14}, {"elif", 14}, {"else", 14}, {"enum", 14},
                         {"false", 14}, {"finally", 14}, {"fn", 14}, {"for", 14},
                         {"if", 14}, {"implements", 14}, {"interface", 14}, {"let", 14},
                         {"match", 14}, {"nil", 14}, {"or", 14}, {"print", 14},

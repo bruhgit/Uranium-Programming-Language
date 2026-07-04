@@ -45,6 +45,13 @@ enum OpCode {
     OP_SUBTRACT,
     OP_MULTIPLY,
     OP_DIVIDE,
+    OP_MODULO,
+    OP_BITAND,
+    OP_BITOR,
+    OP_BITXOR,
+    OP_BITNOT,
+    OP_SHL,
+    OP_SHR,
     OP_NOT,
     OP_EQUAL,
     OP_GREATER,
@@ -64,6 +71,7 @@ enum OpCode {
     OP_POP_EXCEPTION_HANDLER,
     OP_THROW,
     OP_AWAIT,
+    OP_BREAKPOINT,
     OP_NOP,
 };
 

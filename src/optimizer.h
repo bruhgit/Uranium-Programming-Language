@@ -5,7 +5,7 @@
 
 struct FastPathPlan;
 
-void optimizeFunctionTree(const FunctionPtr& function);
+void optimizeFunctionTree(const FunctionPtr& function, int level);
 bool buildFastPathPlan(const FunctionPtr& function,
                        FastPathPlan* plan,
                        std::string* reason);
