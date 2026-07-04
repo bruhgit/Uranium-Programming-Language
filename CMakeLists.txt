@@ -32,6 +32,7 @@ set(SOURCES
     src/crypto_native.cpp
     src/db_native.cpp
     src/thread_native.cpp
+    src/ucpapi_native.cpp
     src/sqlite3.c
 )
 
@@ -77,3 +78,5 @@ endif()
 if(URANIUM_DEBUG_PRINT_CODE)
     target_compile_definitions(uranium PRIVATE URANIUM_DEBUG_PRINT_CODE)
 endif()
+
+
