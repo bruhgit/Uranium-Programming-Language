@@ -1369,7 +1369,7 @@ int main(int argc, const char* argv[]) {
 
     std::string argument = argv[1];
     if (argument == "--version") {
-        std::cout << "Uranium Compiler V3 from omerdev\n";
+        std::cout << "Uranium Compiler V3 from omerdev (and community!)\n";
         return 0;
     }
 
