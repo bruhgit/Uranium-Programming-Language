@@ -16,3 +16,4 @@
 ```
 ------------
 Uranium now works almost seamlessly with Linux and macOS
+(If there is an error, please do not hesitate to let me know.)
