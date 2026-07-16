@@ -1,15 +1,19 @@
 #include "source_loader.h"
+#include "encoding.h"
 #include "package_manager.h"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <unistd.h> // added unistd.h
 #endif
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
