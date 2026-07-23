@@ -9,7 +9,7 @@
    cmake .. && cmake --build . --config Release
 ```
 * bash
-```cmd
+```bash
    cd Uranium
    mkdir bin && cd bin
    cmake .. && cmake --build . --config Release
