@@ -8,6 +8,7 @@
 void configureRuntimeProcessContext(const std::string& executablePath,
                                     const std::string& entryPath,
                                     const std::vector<std::string>& scriptArgs);
+const std::vector<std::string>& getRuntimeScriptArgs();
 
 Value nativeFsCwd(int argCount, const Value* args, std::string* errorMessage);
 Value nativeFsChangeDir(int argCount, const Value* args, std::string* errorMessage);
@@ -50,6 +51,7 @@ Value nativeProcessPlatform(int argCount, const Value* args, std::string* errorM
 Value nativeRuntimeCapabilities(int argCount, const Value* args, std::string* errorMessage);
 Value nativeProcessPid(int argCount, const Value* args, std::string* errorMessage);
 Value nativeProcessSleep(int argCount, const Value* args, std::string* errorMessage);
+Value nativeInput(int argCount, const Value* args, std::string* errorMessage);
 Value nativeProcessRun(int argCount, const Value* args, std::string* errorMessage);
 Value nativeProcessSystem(int argCount, const Value* args, std::string* errorMessage);
 Value nativeProcessExit(int argCount, const Value* args, std::string* errorMessage);

@@ -1,15 +1,8 @@
 #include "object.h"
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "native_jit_mem.h"
 
 void NativeJitRegionDeleter::operator()(void* region) const {
-#ifdef _WIN32
     if (region != nullptr) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        jit_free_executable(region, 0);
     }
-#else
-    (void)region;
-#endif
 }

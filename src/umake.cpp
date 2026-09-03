@@ -9,6 +9,13 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
+#include <functional>
+#include "common.h"
 
 namespace {
 
@@ -22,6 +29,14 @@ bool directoryExists(const std::filesystem::path& path) {
     std::error_code errorCode;
     return std::filesystem::exists(path, errorCode) &&
            std::filesystem::is_directory(path, errorCode);
+}
+
+static bool isAbsolutePath(const std::filesystem::path& path) {
+    if (path.empty()) return false;
+    if (path.is_absolute()) return true;
+    std::string s = path.generic_string();
+    if (s[0] == '/') return true;
+    return false;
 }
 
 std::filesystem::path canonicalize(const std::filesystem::path& path) {
@@ -328,7 +343,7 @@ bool resolveIncludePath(const std::filesystem::path& currentFile,
                         std::filesystem::path* resolvedPath,
                         std::string* errorMessage) {
     std::filesystem::path candidate = std::filesystem::path(rawInclude);
-    if (!candidate.is_absolute()) {
+    if (!isAbsolutePath(candidate)) {
         candidate = currentFile.parent_path() / candidate;
     }
 
@@ -600,6 +615,11 @@ int executeTarget(const UMakeFileData& data,
             return 65;
         }
 
+        if (expanded.rfind("download(", 0) == 0 && expanded.back() == ')') {
+            std::string url = expanded.substr(9, expanded.size() - 10);
+            expanded = "curl -LO " + url;
+        }
+
         if (!silent) {
             std::cout << "[UMake] " << target.name << " -> " << expanded << std::endl;
         }
@@ -631,7 +651,7 @@ bool findUMakeFile(const std::filesystem::path& rawPath,
     }
 
     if (!rawPath.empty()) {
-        std::filesystem::path candidate = rawPath.is_absolute()
+        std::filesystem::path candidate = isAbsolutePath(rawPath)
                                               ? rawPath
                                               : std::filesystem::current_path() / rawPath;
         if (directoryExists(candidate)) {
@@ -749,6 +769,160 @@ int listUMakeTargets(const std::filesystem::path& rawPath,
     return 0;
 }
 
+int executeTargetParallel(const UMakeFileData& data,
+                          const std::string& targetName,
+                          const std::filesystem::path& executablePath,
+                          int jobs) {
+    std::unordered_set<std::string> reachable;
+    std::unordered_set<std::string> visiting;
+    
+    std::function<int(const std::string&)> dfs = [&](const std::string& node) -> int {
+        if (reachable.find(node) != reachable.end()) return 0;
+        if (!visiting.insert(node).second) {
+            std::cerr << "UMake dependency cycle detected at target '" << node << "'." << std::endl;
+            return 65;
+        }
+        auto it = data.targets.find(node);
+        if (it == data.targets.end()) {
+            std::cerr << "Unknown UMake target '" << node << "'." << std::endl;
+            return 66;
+        }
+        for (const std::string& dep : it->second.dependencies) {
+            int status = dfs(dep);
+            if (status != 0) return status;
+        }
+        visiting.erase(node);
+        reachable.insert(node);
+        return 0;
+    };
+    
+    int dfsStatus = dfs(targetName);
+    if (dfsStatus != 0) return dfsStatus;
+    
+    std::unordered_map<std::string, int> inDegree;
+    std::unordered_map<std::string, std::vector<std::string>> dependants;
+    for (const std::string& node : reachable) {
+        inDegree[node] = 0;
+    }
+    
+    for (const std::string& node : reachable) {
+        const UMakeTargetData& t = data.targets.at(node);
+        for (const std::string& dep : t.dependencies) {
+            if (reachable.find(dep) != reachable.end()) {
+                dependants[dep].push_back(node);
+                inDegree[node]++;
+            }
+        }
+    }
+    
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::queue<std::string> readyQueue;
+    
+    int runningTasks = 0;
+    int completedTasks = 0;
+    int totalTasks = static_cast<int>(reachable.size());
+    std::atomic<bool> failed{false};
+    std::atomic<int> exitCode{0};
+    
+    for (const auto& pair : inDegree) {
+        if (pair.second == 0) {
+            readyQueue.push(pair.first);
+        }
+    }
+    
+    while (true) {
+        std::unique_lock<std::mutex> lock(mtx);
+        
+        if (completedTasks == totalTasks || failed.load()) {
+            cv.wait(lock, [&]() { return runningTasks == 0; });
+            break;
+        }
+        
+        while (runningTasks < jobs && !readyQueue.empty() && !failed.load()) {
+            std::string currentTarget = readyQueue.front();
+            readyQueue.pop();
+            runningTasks++;
+            
+            std::thread([currentTarget, &data, executablePath, &mtx, &cv, &readyQueue, &runningTasks, &completedTasks, &dependants, &inDegree, &failed, &exitCode]() {
+                const UMakeTargetData& t = data.targets.at(currentTarget);
+                bool taskFailed = false;
+                int taskExitCode = 0;
+                
+                for (const std::string& rawCommand : t.commands) {
+                    if (failed.load()) break;
+                    
+                    bool silent = false;
+                    bool ignoreFailure = false;
+                    std::size_t index = 0;
+                    while (index < rawCommand.size()) {
+                        if (rawCommand[index] == '@') { silent = true; index++; continue; }
+                        if (rawCommand[index] == '-') { ignoreFailure = true; index++; continue; }
+                        break;
+                    }
+                    
+                    std::string command = trim(rawCommand.substr(index));
+                    if (command.empty()) continue;
+                    
+                    std::string expanded;
+                    std::string errorMessage;
+                    if (!expandTemplate(command, data, &t, executablePath, true, 0, &expanded, &errorMessage)) {
+                        std::lock_guard<std::mutex> errLock(mtx);
+                        std::cerr << errorMessage << std::endl;
+                        taskFailed = true;
+                        taskExitCode = 65;
+                        break;
+                    }
+                    
+                    if (expanded.rfind("download(", 0) == 0 && expanded.back() == ')') {
+                        std::string url = expanded.substr(9, expanded.size() - 10);
+                        expanded = "curl -LO " + url;
+                    }
+
+                    if (!silent) {
+                        std::lock_guard<std::mutex> printLock(mtx);
+                        std::cout << "[UMake] " << t.name << " -> " << expanded << std::endl;
+                    }
+                    
+                    int status = std::system(expanded.c_str());
+                    if (status != 0 && !ignoreFailure) {
+                        std::lock_guard<std::mutex> errLock(mtx);
+                        std::cerr << "UMake command failed in target '" << t.name << "' with exit code " << status << "." << std::endl;
+                        taskFailed = true;
+                        taskExitCode = status == 0 ? 1 : status;
+                        break;
+                    }
+                }
+                
+                std::lock_guard<std::mutex> threadLock(mtx);
+                if (taskFailed) {
+                    failed.store(true);
+                    int currentExit = 0;
+                    if (exitCode.compare_exchange_strong(currentExit, taskExitCode)) {
+                        // Successfully recorded the first failure exit code
+                    }
+                } else {
+                    completedTasks++;
+                    for (const std::string& dep : dependants[currentTarget]) {
+                        inDegree[dep]--;
+                        if (inDegree[dep] == 0) {
+                            readyQueue.push(dep);
+                        }
+                    }
+                }
+                runningTasks--;
+                cv.notify_all();
+            }).detach();
+        }
+        
+        if (completedTasks < totalTasks && !failed.load()) {
+            cv.wait(lock);
+        }
+    }
+    
+    return failed.load() ? exitCode.load() : 0;
+}
+
 int runUMakeTarget(const std::filesystem::path& rawPath,
                    const std::string& targetName,
                    const std::filesystem::path& executablePath) {
@@ -767,7 +941,11 @@ int runUMakeTarget(const std::filesystem::path& rawPath,
     }
 
     WorkingDirectoryGuard guard(data.path.parent_path());
-    std::unordered_set<std::string> visiting;
-    std::unordered_set<std::string> completed;
-    return executeTarget(data, selectedTarget, executablePath, &visiting, &completed);
+    if (g_umakeJobs > 1) {
+        return executeTargetParallel(data, selectedTarget, executablePath, g_umakeJobs);
+    } else {
+        std::unordered_set<std::string> visiting;
+        std::unordered_set<std::string> completed;
+        return executeTarget(data, selectedTarget, executablePath, &visiting, &completed);
+    }
 }

@@ -871,6 +871,11 @@ bool stringifyJsonValue(const Value& value,
         return true;
     }
 
+    if (value.isInt()) {
+        out->append(std::to_string(value.asInt()));
+        return true;
+    }
+
     if (value.isNumber()) {
         double number = value.asNumber();
         if (!std::isfinite(number)) {
@@ -986,6 +991,10 @@ void configureRuntimeProcessContext(const std::string& executablePath,
     context.executablePath = executablePath;
     context.entryPath = entryPath;
     context.scriptArgs = scriptArgs;
+}
+
+const std::vector<std::string>& getRuntimeScriptArgs() {
+    return runtimeProcessContext().scriptArgs;
 }
 
 Value nativeFsCwd(int argCount, const Value* args, std::string* errorMessage) {
@@ -1606,6 +1615,30 @@ Value nativeProcessSleep(int argCount, const Value* args, std::string* errorMess
 
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
     return Value::nilValue();
+}
+
+Value nativeInput(int argCount, const Value* args, std::string* errorMessage) {
+    (void)args;
+    if (argCount > 1) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "Expected 0 or 1 argument but got " + std::to_string(argCount) + ".";
+        }
+        return Value::nilValue();
+    }
+
+    if (argCount == 1) {
+        if (!ensureString(args[0], "input", 0, errorMessage)) {
+            return Value::nilValue();
+        }
+        std::cout << args[0].asString();
+        std::cout.flush();
+    }
+
+    std::string line;
+    if (std::getline(std::cin, line)) {
+        return Value::stringValue(line);
+    }
+    return Value::stringValue("");
 }
 
 Value nativeThreadHardwareConcurrency(int argCount, const Value* args, std::string* errorMessage) {

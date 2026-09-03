@@ -168,7 +168,7 @@ Value nativeUcpRun(int argCount, const Value* args, std::string* errorMessage) {
     // - Zero arguments
     // - Up to 4 arguments of int, double, or char* (string)
     // - Returning int, double, or char* (string)
-    int arity = cArgs.size();
+    int arity = static_cast<int>(cArgs.size());
     
     // We assume the return type is int by default, but we can check if there's a signature hint,
     // or we can return a generic numeric Value.

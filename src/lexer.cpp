@@ -1,6 +1,20 @@
 #include "lexer.h"
 #include <cctype>
 #include <cstring>
+#include <vector>
+#include <unordered_map>
+#include <string>
+
+struct LexerContext {
+    const char* start;
+    const char* current;
+    const char* lineStart;
+    int line;
+    std::string macroName;
+};
+
+static std::vector<LexerContext> macroContextStack;
+static std::unordered_map<std::string, std::string> macros;
 
 struct Lexer {
     const char* originalSource;
@@ -8,6 +22,7 @@ struct Lexer {
     const char* current;
     const char* lineStart;
     int line;
+    std::vector<int> fstringBraceDepth;
 };
 
 static Lexer lexer;
@@ -18,6 +33,9 @@ void initLexer(const char* source) {
     lexer.current = source;
     lexer.lineStart = source;
     lexer.line = 1;
+    lexer.fstringBraceDepth.clear();
+    macroContextStack.clear();
+    macros.clear();
 }
 
 static bool isAtEnd() {
@@ -94,6 +112,24 @@ static void skipWhitespace() {
                     return;
                 }
                 break;
+            case '@': {
+                if (std::strncmp(lexer.current + 1, "define", 6) == 0) {
+                    lexer.current += 7; // @define
+                    while (peek() == ' ' || peek() == '\t') advance();
+                    const char* idStart = lexer.current;
+                    while (std::isalpha(static_cast<unsigned char>(peek())) || std::isdigit(static_cast<unsigned char>(peek())) || peek() == '_') advance();
+                    if (lexer.current > idStart) {
+                        std::string macroName(idStart, lexer.current - idStart);
+                        while (peek() == ' ' || peek() == '\t') advance();
+                        const char* valStart = lexer.current;
+                        while (peek() != '\n' && !isAtEnd()) advance();
+                        std::string macroValue(valStart, lexer.current - valStart);
+                        macros[macroName] = macroValue;
+                        continue;
+                    }
+                }
+                return;
+            }
             default:
                 return;
         }
@@ -152,12 +188,10 @@ static TokenType identifierType() {
             }
             break;
         case 'd':
-            if (lexer.current - lexer.start > 1) {
-                switch (lexer.start[1]) {
-                    case 'e':
-                        return checkKeyword(2, 6, "bugger", TOKEN_DEBUGGER);
-                    default:
-                        return checkKeyword(1, 6, "efault", TOKEN_DEFAULT);
+            if (lexer.current - lexer.start > 2 && lexer.start[1] == 'e') {
+                switch (lexer.start[2]) {
+                    case 'b': return checkKeyword(3, 5, "ugger", TOKEN_DEBUGGER);
+                    case 'f': return checkKeyword(3, 4, "ault", TOKEN_DEFAULT);
                 }
             }
             break;
@@ -201,11 +235,30 @@ static TokenType identifierType() {
         case 'm':
             return checkKeyword(1, 4, "atch", TOKEN_MATCH);
         case 'n':
+            if (lexer.current - lexer.start > 1 && lexer.start[1] == 'a') {
+                return checkKeyword(2, 7, "mespace", TOKEN_NAMESPACE);
+            }
             return checkKeyword(1, 2, "il", TOKEN_NIL);
         case 'o':
             return checkKeyword(1, 1, "r", TOKEN_OR);
+        case 'O':
+            return checkKeyword(1, 7, "ptional", TOKEN_OPTIONAL);
         case 'p':
-            return checkKeyword(1, 4, "rint", TOKEN_PRINT);
+            if (lexer.current - lexer.start > 3) {
+                if (lexer.start[1] == 'u') {
+                    return checkKeyword(2, 4, "blic", TOKEN_PUBLIC);
+                }
+                if (lexer.start[1] == 'r' && lexer.start[2] == 'i') {
+                    if (lexer.start[3] == 'v') {
+                        return checkKeyword(4, 3, "ate", TOKEN_PRIVATE);
+                    }
+                    if (lexer.start[3] == 'n') {
+                        if (lexer.current - lexer.start == 5) return checkKeyword(4, 1, "t", TOKEN_PRINT);
+                        if (lexer.current - lexer.start == 6) return checkKeyword(4, 2, "tn", TOKEN_PRINTN);
+                    }
+                }
+            }
+            break;
         case 'r':
             return checkKeyword(1, 5, "eturn", TOKEN_RETURN);
         case 's':
@@ -220,6 +273,14 @@ static TokenType identifierType() {
                         break;
                     case 'w':
                         return checkKeyword(2, 4, "itch", TOKEN_SWITCH);
+                    case 't':
+                        if (lexer.current - lexer.start > 2) {
+                            switch (lexer.start[2]) {
+                                case 'a': return checkKeyword(3, 3, "tic", TOKEN_STATIC);
+                                case 'r': return checkKeyword(3, 3, "uct", TOKEN_STRUCT);
+                            }
+                        }
+                        break;
                 }
             }
             break;
@@ -257,11 +318,81 @@ static TokenType identifierType() {
     return TOKEN_IDENTIFIER;
 }
 
+static Token fstringPart(TokenType type) {
+    while (peek() != '"' && peek() != '{' && !isAtEnd()) {
+        if (peek() == '\n') {
+            lexer.line++;
+            lexer.lineStart = lexer.current + 1;
+        }
+        advance();
+    }
+    
+    if (isAtEnd()) {
+        return errorToken("Unterminated f-string.");
+    }
+    
+    if (peek() == '"') {
+        advance(); // consume "
+        return makeToken(type == TOKEN_FSTRING_START ? TOKEN_STRING : TOKEN_FSTRING_END);
+    }
+    
+    // peek() == '{'
+    advance(); // consume {
+    lexer.fstringBraceDepth.push_back(0);
+    return makeToken(type);
+}
+
 static Token identifier() {
     while (std::isalpha(static_cast<unsigned char>(peek())) ||
            std::isdigit(static_cast<unsigned char>(peek())) ||
            peek() == '_') {
         advance();
+    }
+
+    std::string name(lexer.start, lexer.current - lexer.start);
+    auto it = macros.find(name);
+    if (it != macros.end()) {
+        bool inStack = false;
+        for (const auto& ctx : macroContextStack) {
+            if (ctx.macroName == name) { inStack = true; break; }
+        }
+        if (!inStack) {
+            LexerContext ctx;
+            ctx.start = lexer.start;
+            ctx.current = lexer.current;
+            ctx.lineStart = lexer.lineStart;
+            ctx.line = lexer.line;
+            ctx.macroName = name;
+            macroContextStack.push_back(ctx);
+
+            lexer.start = it->second.c_str();
+            lexer.current = it->second.c_str();
+            
+            return scanToken();
+        }
+    }
+
+    if ((lexer.current - lexer.start == 1) && lexer.start[0] == 'f' && peek() == '"') {
+        advance(); // consume '"'
+        return fstringPart(TOKEN_FSTRING_START);
+    }
+
+    if ((lexer.current - lexer.start == 1) && lexer.start[0] == 'R' && peek() == '"' && peekNext() == '(') {
+        advance(); // "
+        advance(); // (
+        while (!(peek() == ')' && peekNext() == '"') && !isAtEnd()) {
+            if (peek() == '\n') {
+                lexer.line++;
+                lexer.lineStart = lexer.current + 1;
+            }
+            advance();
+        }
+        if (isAtEnd()) {
+            return errorToken("Unterminated R-string.");
+        }
+        advance(); // )
+        advance(); // "
+        return makeToken(TOKEN_STRING);
     }
 
     return makeToken(identifierType());
@@ -302,7 +433,20 @@ static Token string() {
 }
 
 Token scanToken() {
-    skipWhitespace();
+    while (true) {
+        skipWhitespace();
+        if (isAtEnd() && !macroContextStack.empty()) {
+            LexerContext ctx = macroContextStack.back();
+            macroContextStack.pop_back();
+            lexer.start = ctx.start;
+            lexer.current = ctx.current;
+            lexer.lineStart = ctx.lineStart;
+            lexer.line = ctx.line;
+            continue;
+        }
+        break;
+    }
+
     lexer.start = lexer.current;
 
     if (isAtEnd()) {
@@ -322,8 +466,19 @@ Token scanToken() {
     switch (c) {
         case '(': return makeToken(TOKEN_LEFT_PAREN);
         case ')': return makeToken(TOKEN_RIGHT_PAREN);
-        case '{': return makeToken(TOKEN_LEFT_BRACE);
-        case '}': return makeToken(TOKEN_RIGHT_BRACE);
+        case '{': 
+            if (!lexer.fstringBraceDepth.empty()) lexer.fstringBraceDepth.back()++;
+            return makeToken(TOKEN_LEFT_BRACE);
+        case '}': 
+            if (!lexer.fstringBraceDepth.empty()) {
+                if (lexer.fstringBraceDepth.back() > 0) {
+                    lexer.fstringBraceDepth.back()--;
+                } else {
+                    lexer.fstringBraceDepth.pop_back();
+                    return fstringPart(TOKEN_FSTRING_MID);
+                }
+            }
+            return makeToken(TOKEN_RIGHT_BRACE);
         case '[': return makeToken(TOKEN_LEFT_BRACKET);
         case ']': return makeToken(TOKEN_RIGHT_BRACKET);
         case ',': return makeToken(TOKEN_COMMA);
@@ -331,6 +486,7 @@ Token scanToken() {
         case '.': return makeToken(TOKEN_DOT);
         case '?': return makeToken(TOKEN_QUESTION);
         case ';': return makeToken(TOKEN_SEMICOLON);
+        case '@': return makeToken(TOKEN_AT);
         case '%': return makeToken(TOKEN_PERCENT);
         case '&': return makeToken(TOKEN_AMPERSAND);
         case '|': return makeToken(TOKEN_PIPE);
@@ -391,6 +547,9 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_LESS_EQUAL: return "LESS_EQUAL";
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
         case TOKEN_STRING: return "STRING";
+        case TOKEN_FSTRING_START: return "FSTRING_START";
+        case TOKEN_FSTRING_MID: return "FSTRING_MID";
+        case TOKEN_FSTRING_END: return "FSTRING_END";
         case TOKEN_NUMBER: return "NUMBER";
         case TOKEN_AND: return "AND";
         case TOKEN_ASYNC: return "ASYNC";
@@ -416,9 +575,15 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_INTERFACE: return "INTERFACE";
         case TOKEN_MATCH: return "MATCH";
         case TOKEN_NIL: return "NIL";
+        case TOKEN_OPTIONAL: return "OPTIONAL";
         case TOKEN_OR: return "OR";
         case TOKEN_PRINT: return "PRINT";
         case TOKEN_RETURN: return "RETURN";
+        case TOKEN_PUBLIC: return "PUBLIC";
+        case TOKEN_PRIVATE: return "PRIVATE";
+        case TOKEN_STATIC: return "STATIC";
+        case TOKEN_NAMESPACE: return "NAMESPACE";
+        case TOKEN_STRUCT: return "STRUCT";
         case TOKEN_SUPER: return "SUPER";
         case TOKEN_SWITCH: return "SWITCH";
         case TOKEN_THIS: return "THIS";

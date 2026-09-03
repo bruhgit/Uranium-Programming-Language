@@ -207,6 +207,7 @@ struct ClassObject : HeapObject {
     std::string name;
     ClassPtr superclass;
     std::unordered_map<std::string, ClosurePtr> methods;
+    std::unordered_map<std::string, Value> fields;
 
     explicit ClassObject(std::string className)
         : HeapObject(OBJ_CLASS), name(std::move(className)), superclass(nullptr) {
@@ -225,9 +226,14 @@ struct InstanceObject : HeapObject {
 struct BoundMethodObject : HeapObject {
     Value receiver;
     ClosurePtr method;
+    NativeFunctionPtr nativeMethod;
 
     BoundMethodObject(Value receiverValue, ClosurePtr methodValue)
-        : HeapObject(OBJ_BOUND_METHOD), receiver(std::move(receiverValue)), method(methodValue) {
+        : HeapObject(OBJ_BOUND_METHOD), receiver(std::move(receiverValue)), method(methodValue), nativeMethod(nullptr) {
+    }
+
+    BoundMethodObject(Value receiverValue, NativeFunctionPtr nativeMethodValue)
+        : HeapObject(OBJ_BOUND_METHOD), receiver(std::move(receiverValue)), method(nullptr), nativeMethod(nativeMethodValue) {
     }
 };
 

@@ -77,6 +77,14 @@ bool directoryExists(const std::filesystem::path& path) {
            std::filesystem::is_directory(path, errorCode);
 }
 
+static bool isAbsolutePath(const std::filesystem::path& path) {
+    if (path.empty()) return false;
+    if (path.is_absolute()) return true;
+    std::string s = path.generic_string();
+    if (s[0] == '/') return true;
+    return false;
+}
+
 std::filesystem::path canonicalize(const std::filesystem::path& path) {
     std::error_code errorCode;
     std::filesystem::path result = std::filesystem::weakly_canonical(path, errorCode);
@@ -961,7 +969,7 @@ void sortDiagnostics(std::vector<ToolDiagnostic>* diagnostics) {
 }
 
 std::filesystem::path resolveTargetPath(const std::filesystem::path& rawPath) {
-    if (rawPath.is_absolute()) {
+    if (isAbsolutePath(rawPath)) {
         return canonicalize(rawPath);
     }
     return canonicalize(std::filesystem::current_path() / rawPath);
@@ -1327,7 +1335,10 @@ static std::filesystem::path resolveImportModulePath(const std::string& spec,
 
     if (spec.size() >= 2 && spec.front() == '"' && spec.back() == '"') {
         std::string rawPath = spec.substr(1, spec.size() - 2);
-        std::filesystem::path candidate = importerPath.parent_path() / rawPath;
+        std::filesystem::path rawPathPath(rawPath);
+        std::filesystem::path candidate = isAbsolutePath(rawPathPath)
+                                              ? rawPathPath
+                                              : (importerPath.parent_path() / rawPathPath);
         if (candidate.extension().empty()) {
             candidate += ".ur";
         }
@@ -1658,7 +1669,10 @@ static const SymbolIndex* buildSymbolIndexForPath(
 
     SymbolIndex index;
     index.filePath = canonical;
-    index.uri = "file:///" + canonical.generic_string();
+    std::string canonicalStr = canonical.generic_string();
+    index.uri = (!canonicalStr.empty() && canonicalStr[0] == '/')
+                ? "file://" + canonicalStr
+                : "file:///" + canonicalStr;
 
     bool hadTrailingNewline = false;
     std::vector<std::string> lines = splitLines(source, &hadTrailingNewline);
@@ -2120,10 +2134,16 @@ static std::string percentDecode(const std::string& text) {
 }
 
 static std::filesystem::path fileUriToPath(const std::string& uri) {
-    std::string prefix = "file:///";
+    std::string prefix = "file://";
     if (uri.rfind(prefix, 0) == 0) {
         std::string body = percentDecode(uri.substr(prefix.size()));
+#ifdef _WIN32
+        // On Windows, if path is /C:/..., strip the leading slash
+        if (body.size() >= 3 && body[0] == '/' && body[2] == ':') {
+            body = body.substr(1);
+        }
         std::replace(body.begin(), body.end(), '/', '\\');
+#endif
         return body;
     }
 
@@ -2132,6 +2152,9 @@ static std::filesystem::path fileUriToPath(const std::string& uri) {
 
 static std::string pathToFileUri(const std::filesystem::path& path) {
     std::string normalized = canonicalize(path).generic_string();
+    if (!normalized.empty() && normalized[0] == '/') {
+        return "file://" + normalized;
+    }
     return "file:///" + normalized;
 }
 

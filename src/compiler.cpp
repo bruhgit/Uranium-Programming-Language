@@ -96,11 +96,44 @@ struct Compiler {
     int scopeDepth;
 };
 
+enum class TargetOS {
+    WIN32_OS, // Avoid collision with #define WIN32
+    MACOS_OS,
+    LINUX_OS,
+    UNKNOWN_OS
+};
+
+static TargetOS getCurrentOS() {
+#if defined(_WIN32)
+    return TargetOS::WIN32_OS;
+#elif defined(__APPLE__)
+    return TargetOS::MACOS_OS;
+#elif defined(__linux__)
+    return TargetOS::LINUX_OS;
+#else
+    return TargetOS::UNKNOWN_OS;
+#endif
+}
+
+struct OsGroup {
+    bool active = false;
+    int branchesSeen = 0;
+    bool matched = false;
+    int matchedBranchTokens = 0;
+    Token startToken;
+    int skipJump = -1;
+};
+
 struct Parser {
     Token current;
     Token previous;
     bool hadError;
     bool panicMode;
+    bool autoMainEnabled;
+    bool platformErrorsEnabled;
+    bool explicitMainReferenceSeen;
+    Token explicitMainReferenceToken;
+    OsGroup osGroup;
 };
 
 struct ClassCompiler {
@@ -250,6 +283,9 @@ static void advanceParser() {
     for (;;) {
         parser.current = scanToken();
         if (parser.current.type != TOKEN_ERROR) {
+            if (parser.osGroup.active && parser.osGroup.matched) {
+                parser.osGroup.matchedBranchTokens++;
+            }
             break;
         }
 
@@ -947,7 +983,7 @@ static bool resolveGlobalSymbol(const Token& name, bool* isConst) {
 }
 
 static std::string getVariableType(const Token& name) {
-    for (int i = current->locals.size() - 1; i >= 0; --i) {
+    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; --i) {
         if (identifiersEqual(name, current->locals[i].name)) {
             return normalizeTypeAnnotation(current->locals[i].typeAnnotation);
         }
@@ -970,6 +1006,8 @@ static void orExpression(bool canAssign);
 static void collectionLiteral();
 static void primary(bool canAssign);
 static void classDeclaration();
+static void structDeclaration();
+static void namespaceDeclaration();
 static void enumDeclaration();
 static void contractDeclaration(bool isTrait);
 static void tryStatement();
@@ -1009,6 +1047,7 @@ static void synchronize() {
             case TOKEN_DEFAULT:
             case TOKEN_ELIF:
             case TOKEN_PRINT:
+            case TOKEN_PRINTN:
             case TOKEN_RETURN:
             case TOKEN_SWITCH:
             case TOKEN_RIGHT_BRACE:
@@ -1232,6 +1271,60 @@ static void patchPatternFailJumps(const std::vector<int>& failJumps) {
     emitByte(OP_POP);
 }
 
+static std::string extractStringLexeme(const Token& token) {
+    std::string raw;
+    bool isRaw = false;
+    if (token.start[0] == 'f') {
+        raw = std::string(token.start + 2, token.length - 3);
+    } else if (token.start[0] == 'R') {
+        raw = std::string(token.start + 3, token.length - 5);
+        isRaw = true;
+    } else {
+        raw = std::string(token.start + 1, token.length - 2);
+    }
+
+    if (isRaw) return raw;
+
+    std::string unescaped;
+    for (size_t i = 0; i < raw.length(); ++i) {
+        if (raw[i] == '\\' && i + 1 < raw.length()) {
+            i++;
+            switch (raw[i]) {
+                case 'n': unescaped += '\n'; break;
+                case 'r': unescaped += '\r'; break;
+                case 't': unescaped += '\t'; break;
+                case '\\': unescaped += '\\'; break;
+                case '"': unescaped += '"'; break;
+                default: unescaped += '\\'; unescaped += raw[i]; break;
+            }
+        } else {
+            unescaped += raw[i];
+        }
+    }
+    return unescaped;
+}
+
+static void fstringInterpolation() {
+    std::string part = extractStringLexeme(parser.previous);
+    emitConstant(Value::stringValue(part));
+
+    expression();
+    emitByte(OP_ADD);
+
+    while (match(TOKEN_FSTRING_MID)) {
+        std::string mid(parser.previous.start + 1, parser.previous.length - 2);
+        emitConstant(Value::stringValue(mid));
+        emitByte(OP_ADD);
+        expression();
+        emitByte(OP_ADD);
+    }
+
+    consume(TOKEN_FSTRING_END, "Expect end of f-string.");
+    std::string end(parser.previous.start + 1, parser.previous.length - 2);
+    emitConstant(Value::stringValue(end));
+    emitByte(OP_ADD);
+}
+
 static void emitLiteralTokenValue(const Token& token) {
     switch (token.type) {
         case TOKEN_FALSE:
@@ -1253,7 +1346,7 @@ static void emitLiteralTokenValue(const Token& token) {
             return;
         }
         case TOKEN_STRING: {
-            std::string lexeme(token.start + 1, token.length - 2);
+            std::string lexeme = extractStringLexeme(token);
             emitConstant(Value::stringValue(lexeme));
             return;
         }
@@ -1310,7 +1403,7 @@ static std::shared_ptr<Pattern> parsePattern() {
 
                 if (match(TOKEN_STRING)) {
                     const Token keyToken = parser.previous;
-                    field.key = std::string(keyToken.start + 1, keyToken.length - 2);
+                    field.key = extractStringLexeme(keyToken);
                     consume(TOKEN_COLON, "Expect ':' after object pattern string key.");
                     field.pattern = parsePattern();
                 } else {
@@ -1593,6 +1686,13 @@ static void compilePatternBindingsFromLocal(const std::shared_ptr<Pattern>& patt
 }
 
 static void namedVariable(Token name, bool canAssign) {
+    if (name.length == 4 && memcmp(name.start, "main", 4) == 0) {
+        if (check(TOKEN_LEFT_PAREN)) {
+            parser.explicitMainReferenceSeen = true;
+            parser.explicitMainReferenceToken = name;
+        }
+    }
+
     clearResolvedCallable();
     bool isConst = false;
     int local = resolveLocal(current, name, &isConst);
@@ -2156,8 +2256,15 @@ static void primary(bool canAssign) {
         return;
     }
 
+    if (match(TOKEN_FSTRING_START)) {
+        fstringInterpolation();
+        setType("String");
+        clearResolvedCallable();
+        return;
+    }
+
     if (match(TOKEN_STRING)) {
-        std::string lexeme(parser.previous.start + 1, parser.previous.length - 2);
+        std::string lexeme = extractStringLexeme(parser.previous);
         emitConstant(Value::stringValue(lexeme));
         setType("String");
         clearResolvedCallable();
@@ -2255,6 +2362,7 @@ static FunctionPtr function(const Token& name, FunctionType type, bool isAsync) 
                 errorAtCurrent("Functions cannot have more than 255 parameters.");
             }
 
+            bool isOptional = match(TOKEN_OPTIONAL);
             Token parameter = consume(TOKEN_IDENTIFIER, "Expect parameter name.");
             std::string parameterType;
             if (match(TOKEN_COLON)) {
@@ -2271,30 +2379,47 @@ static FunctionPtr function(const Token& name, FunctionType type, bool isAsync) 
             current->function->parameterNames.push_back(tokenLexeme(parameter));
             current->function->parameterTypes.push_back(normalizeTypeAnnotation(parameterType));
 
-            if (match(TOKEN_EQUAL)) {
+            if (match(TOKEN_EQUAL) || isOptional) {
                 sawDefaultParameter = true;
-                int parameterSlot = findDeclaredLocalSlot(current, parameter);
-                emitBytes(OP_GET_LOCAL, static_cast<uint8_t>(parameterSlot));
-                emitUnset();
-                emitByte(OP_EQUAL);
-                int skipDefaultJump = emitJump(OP_JUMP_IF_FALSE);
-                emitByte(OP_POP);
-                expression();
-                if (isConcreteTypeAnnotation(parameterType) &&
-                    isConcreteTypeAnnotation(lastEmittedType)) {
-                    reportTypeMismatch(parameterType, lastEmittedType,
-                                       "default value for parameter '" +
-                                           tokenLexeme(parameter) + "'");
+                // If it has an equal sign (even if marked Optional), evaluate default value
+                if (parser.previous.type == TOKEN_EQUAL || match(TOKEN_EQUAL)) {
+                    int parameterSlot = findDeclaredLocalSlot(current, parameter);
+                    emitBytes(OP_GET_LOCAL, static_cast<uint8_t>(parameterSlot));
+                    emitUnset();
+                    emitByte(OP_EQUAL);
+                    int skipDefaultJump = emitJump(OP_JUMP_IF_FALSE);
+                    emitByte(OP_POP);
+                    expression();
+                    if (isConcreteTypeAnnotation(parameterType) &&
+                        isConcreteTypeAnnotation(lastEmittedType)) {
+                        reportTypeMismatch(parameterType, lastEmittedType,
+                                           "default value for parameter '" +
+                                               tokenLexeme(parameter) + "'");
+                    }
+                    emitBytes(OP_SET_LOCAL, static_cast<uint8_t>(parameterSlot));
+                    emitByte(OP_POP);
+                    int endDefaultJump = emitJump(OP_JUMP);
+                    patchJump(skipDefaultJump);
+                    emitByte(OP_POP);
+                    patchJump(endDefaultJump);
+                } else if (isOptional) {
+                    int parameterSlot = findDeclaredLocalSlot(current, parameter);
+                    emitBytes(OP_GET_LOCAL, static_cast<uint8_t>(parameterSlot));
+                    emitUnset();
+                    emitByte(OP_EQUAL);
+                    int skipDefaultJump = emitJump(OP_JUMP_IF_FALSE);
+                    emitByte(OP_POP);
+                    emitByte(OP_NIL);
+                    emitBytes(OP_SET_LOCAL, static_cast<uint8_t>(parameterSlot));
+                    emitByte(OP_POP);
+                    int endDefaultJump = emitJump(OP_JUMP);
+                    patchJump(skipDefaultJump);
+                    emitByte(OP_POP);
+                    patchJump(endDefaultJump);
                 }
-                emitBytes(OP_SET_LOCAL, static_cast<uint8_t>(parameterSlot));
-                emitByte(OP_POP);
-                int endDefaultJump = emitJump(OP_JUMP);
-                patchJump(skipDefaultJump);
-                emitByte(OP_POP);
-                patchJump(endDefaultJump);
             } else {
                 if (sawDefaultParameter) {
-                    error("Required parameters cannot follow default parameters.");
+                    error("Required parameters cannot follow optional or default parameters.");
                 }
                 current->function->minArity++;
             }
@@ -2492,33 +2617,67 @@ static void classDeclaration() {
     std::vector<ContractMethod> definedMethods;
 
     while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+        bool isStatic = false;
+        bool isPublic = true;
+        
+        while (check(TOKEN_PUBLIC) || check(TOKEN_PRIVATE) || check(TOKEN_STATIC)) {
+            if (match(TOKEN_PUBLIC)) isPublic = true;
+            else if (match(TOKEN_PRIVATE)) isPublic = false;
+            else if (match(TOKEN_STATIC)) isStatic = true;
+        }
+
         bool isAsyncMethod = false;
         if (match(TOKEN_ASYNC)) {
             isAsyncMethod = true;
         }
 
-        if (!match(TOKEN_FN)) {
-            errorAtCurrent("Only fn or async fn methods are allowed inside a class body.");
-            synchronize();
-            continue;
-        }
+        if (match(TOKEN_FN)) {
+            Token methodName = consume(TOKEN_IDENTIFIER, "Expect method name after 'fn'.");
+            if (methodName.type != TOKEN_IDENTIFIER) {
+                continue;
+            }
 
-        Token methodName = consume(TOKEN_IDENTIFIER, "Expect method name after 'fn'.");
-        if (methodName.type != TOKEN_IDENTIFIER) {
-            continue;
+            if (isStatic) {
+                namedVariable(className, false);
+                FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsyncMethod);
+                emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(methodName));
+                emitByte(OP_POP);
+            } else {
+                FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsyncMethod);
+                emitConstantIndex(OP_METHOD, OP_METHOD_LONG, identifierConstant(methodName));
+                definedMethods.push_back({
+                    tokenLexeme(methodName),
+                    methodFunction == nullptr ? 0 : methodFunction->arity - 1,
+                    isAsyncMethod,
+                });
+            }
+        } else {
+            bool hasLet = match(TOKEN_LET) || match(TOKEN_CONST);
+            Token fieldName = consume(TOKEN_IDENTIFIER, "Expect field name.");
+            consume(TOKEN_EQUAL, "Expect '=' after field name.");
+            
+            if (isStatic) {
+                namedVariable(className, false);
+                expression();
+                emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(fieldName));
+                emitByte(OP_POP);
+            } else {
+                expression();
+            }
+            optionalSemicolon();
         }
-
-        FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsyncMethod);
-        emitConstantIndex(OP_METHOD, OP_METHOD_LONG, identifierConstant(methodName));
-        definedMethods.push_back({
-            tokenLexeme(methodName),
-            methodFunction == nullptr ? 0 : methodFunction->arity - 1,
-            isAsyncMethod,
-        });
     }
     currentClass = currentClass->enclosing;
 
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
+
+    if (classCompiler.enclosing != nullptr) {
+        namedVariable(classCompiler.enclosing->name, false);
+        namedVariable(className, false);
+        emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(className));
+        emitByte(OP_POP);
+    }
+
     emitByte(OP_POP);
 
     if (!implementedContracts.empty()) {
@@ -2668,7 +2827,7 @@ static void forVariableDeclaration(bool isConst) {
     consumeForClauseSeparator();
 }
 
-static void printStatement() {
+static void printStatement(bool newline) {
     bool hasParentheses = match(TOKEN_LEFT_PAREN);
     expression();
 
@@ -2676,7 +2835,7 @@ static void printStatement() {
         consume(TOKEN_RIGHT_PAREN, "Expect ')' after value.");
     }
 
-    emitByte(OP_PRINT);
+    emitByte(newline ? OP_PRINTN : OP_PRINT);
     optionalSemicolon();
 }
 
@@ -2937,9 +3096,11 @@ static void switchStatement() {
             int nextCaseJump = emitJump(OP_JUMP_IF_FALSE);
             emitByte(OP_POP);
 
-            consume(TOKEN_LEFT_BRACE, "Expect '{' before case body.");
+            consume(TOKEN_COLON, "Expect ':' after case value.");
             beginScope();
-            block();
+            while (!check(TOKEN_CASE) && !check(TOKEN_DEFAULT) && !check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+                declaration();
+            }
             endScope();
             endJumps.push_back(emitJump(OP_JUMP));
 
@@ -2954,15 +3115,20 @@ static void switchStatement() {
             }
 
             sawDefault = true;
-            consume(TOKEN_LEFT_BRACE, "Expect '{' before default body.");
+            consume(TOKEN_COLON, "Expect ':' after 'default'.");
             beginScope();
-            block();
+            while (!check(TOKEN_CASE) && !check(TOKEN_DEFAULT) && !check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+                declaration();
+            }
             endScope();
             continue;
         }
 
         errorAtCurrent("Expect 'case', 'default', or '}' inside switch.");
         synchronize();
+        if (!check(TOKEN_CASE) && !check(TOKEN_DEFAULT) && !check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+            advanceParser();
+        }
     }
 
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after switch body.");
@@ -3129,7 +3295,12 @@ static void forStatement() {
 
 static void statement() {
     if (match(TOKEN_PRINT)) {
-        printStatement();
+        printStatement(false);
+        return;
+    }
+    
+    if (match(TOKEN_PRINTN)) {
+        printStatement(true);
         return;
     }
 
@@ -3217,8 +3388,17 @@ static void declaration() {
         return;
     }
 
+    // Parse and discard modifiers at the top level
+    while (check(TOKEN_PUBLIC) || check(TOKEN_PRIVATE) || check(TOKEN_STATIC)) {
+        advanceParser();
+    }
+
     if (match(TOKEN_CLASS)) {
         classDeclaration();
+    } else if (match(TOKEN_STRUCT)) {
+        structDeclaration();
+    } else if (match(TOKEN_NAMESPACE)) {
+        namespaceDeclaration();
     } else if (match(TOKEN_ENUM)) {
         enumDeclaration();
     } else if (match(TOKEN_INTERFACE)) {
@@ -3234,6 +3414,161 @@ static void declaration() {
         variableDeclaration(false);
     } else if (match(TOKEN_CONST)) {
         variableDeclaration(true);
+    } else if (match(TOKEN_AT)) {
+        if (match(TOKEN_IDENTIFIER)) {
+            std::string ns(parser.previous.start, parser.previous.length);
+            if (ns == "vm") {
+                consume(TOKEN_IDENTIFIER, "Expect compiler directive name after '@vm'.");
+                std::string directive(parser.previous.start, parser.previous.length);
+                if (directive == "AUTO_MAIN") {
+                    bool value = true;
+                    if (match(TOKEN_FALSE)) {
+                        value = false;
+                    } else if (match(TOKEN_TRUE)) {
+                        value = true;
+                    } else {
+                        errorAtCurrent("Expect 'true' or 'false' after '@vm AUTO_MAIN'.");
+                    }
+                    
+                    parser.autoMainEnabled = value;
+                    emitConstant(Value(value));
+                    Token temp = syntheticToken(TOKEN_IDENTIFIER, "@vm_auto_main", parser.previous.line);
+                    uint8_t global = identifierConstant(temp);
+                    emitBytes(OP_DEFINE_GLOBAL, global);
+                } else if (directive == "USE_BASICS") {
+                    bool value = true;
+                    if (match(TOKEN_FALSE)) {
+                        value = false;
+                    } else if (match(TOKEN_TRUE)) {
+                        value = true;
+                    } else {
+                        errorAtCurrent("Expect 'true' or 'false' after '@vm USE_BASICS'.");
+                    }
+                    
+                    emitConstant(Value(value));
+                    Token temp = syntheticToken(TOKEN_IDENTIFIER, "@vm_use_basics", parser.previous.line);
+                    uint8_t global = identifierConstant(temp);
+                    emitBytes(OP_DEFINE_GLOBAL, global);
+
+                } else if (directive == "PLATFORM_ERRORS") {
+                    bool value = true;
+                    if (match(TOKEN_FALSE)) {
+                        value = false;
+                    } else if (match(TOKEN_TRUE)) {
+                        value = true;
+                    } else {
+                        errorAtCurrent("Expect 'true' or 'false' after '@vm PLATFORM_ERRORS'.");
+                    }
+                    
+                    parser.platformErrorsEnabled = value;
+                } else {
+                    errorAtCurrent(("Unknown compiler directive '@vm " + directive + "'.").c_str());
+                }
+            } else if (ns == "os") {
+                consume(TOKEN_IDENTIFIER, "Expect OS identifier after '@os'.");
+                std::string osName(parser.previous.start, parser.previous.length);
+                TargetOS targetOs = TargetOS::UNKNOWN_OS;
+                if (osName == "WIN32") targetOs = TargetOS::WIN32_OS;
+                else if (osName == "MACOS") targetOs = TargetOS::MACOS_OS;
+                else if (osName == "LINUX") targetOs = TargetOS::LINUX_OS;
+                
+                if (osName == "END") {
+                    if (!parser.osGroup.active) {
+                        errorAtCurrent("Unexpected '@os END' without an active @os block.");
+                    } else {
+                        if (parser.osGroup.skipJump != -1) {
+                            patchJump(parser.osGroup.skipJump);
+                            parser.osGroup.skipJump = -1;
+                        }
+                        if (parser.osGroup.branchesSeen <= 1) {
+                            std::cout << "\033[1;33mWarning:\033[0m @os group ended with only " << parser.osGroup.branchesSeen << " branch. Consider removing it if it's not cross-platform.\n";
+                        }
+                        if (parser.osGroup.matched && parser.osGroup.matchedBranchTokens == 0) {
+                            std::cout << "\033[1;33mWarning:\033[0m Matched @os branch was completely empty.\n";
+                        }
+                        parser.osGroup.active = false;
+                    }
+                } else if (targetOs != TargetOS::UNKNOWN_OS) {
+                    if (!parser.osGroup.active) {
+                        parser.osGroup.active = true;
+                        parser.osGroup.branchesSeen = 0;
+                        parser.osGroup.matched = false;
+                        parser.osGroup.matchedBranchTokens = 0;
+                        parser.osGroup.startToken = parser.previous;
+                        parser.osGroup.skipJump = -1;
+                    }
+                    parser.osGroup.branchesSeen++;
+                    
+                    if (parser.osGroup.skipJump != -1) {
+                        patchJump(parser.osGroup.skipJump);
+                        parser.osGroup.skipJump = -1;
+                    }
+                    
+                    if (targetOs == getCurrentOS() && !parser.osGroup.matched) {
+                        parser.osGroup.matched = true;
+                        parser.osGroup.matchedBranchTokens = 0;
+                    } else {
+                        if (parser.platformErrorsEnabled) {
+                            parser.osGroup.skipJump = emitJump(OP_JUMP);
+                        } else {
+                            while (!check(TOKEN_EOF)) {
+                                Token t = scanToken();
+                                if (t.type == TOKEN_AT) {
+                                    Token nextNs = scanToken();
+                                    if (nextNs.type == TOKEN_IDENTIFIER && std::string(nextNs.start, nextNs.length) == "os") {
+                                        Token osToken = scanToken();
+                                        if (osToken.type != TOKEN_IDENTIFIER) {
+                                            parser.current = osToken;
+                                            errorAtCurrent("Expect OS identifier after '@os'.");
+                                            break;
+                                        }
+                                        std::string skipOsName(osToken.start, osToken.length);
+                                        TargetOS skipTargetOs = TargetOS::UNKNOWN_OS;
+                                        if (skipOsName == "WIN32") skipTargetOs = TargetOS::WIN32_OS;
+                                        else if (skipOsName == "MACOS") skipTargetOs = TargetOS::MACOS_OS;
+                                        else if (skipOsName == "LINUX") skipTargetOs = TargetOS::LINUX_OS;
+                                        
+                                        if (skipOsName == "END") {
+                                            if (parser.osGroup.branchesSeen <= 1) {
+                                                std::cout << "\033[1;33mWarning:\033[0m @os group ended with only " << parser.osGroup.branchesSeen << " branch. Consider removing it if it's not cross-platform.\n";
+                                            }
+                                            if (parser.osGroup.matched && parser.osGroup.matchedBranchTokens == 0) {
+                                                std::cout << "\033[1;33mWarning:\033[0m Matched @os branch was completely empty.\n";
+                                            }
+                                            parser.osGroup.active = false;
+                                            parser.previous = osToken;
+                                            advanceParser();
+                                            break;
+                                        } else if (skipTargetOs != TargetOS::UNKNOWN_OS) {
+                                            parser.osGroup.branchesSeen++;
+                                            if (skipTargetOs == getCurrentOS() && !parser.osGroup.matched) {
+                                                parser.osGroup.matched = true;
+                                                parser.osGroup.matchedBranchTokens = 0;
+                                                parser.previous = osToken;
+                                                advanceParser();
+                                                break;
+                                            }
+                                        } else {
+                                            parser.current = osToken;
+                                            errorAtCurrent(("Invalid OS identifier '" + skipOsName + "'. Expected WIN32, MACOS, LINUX or END.").c_str());
+                                            parser.previous = osToken;
+                                            advanceParser();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    errorAt(parser.previous, ("Invalid OS identifier '" + osName + "'. Expected WIN32, MACOS, LINUX or END.").c_str());
+                }
+            } else {
+                errorAt(parser.previous, "Expect 'vm' or 'os' after '@' for compiler directive.");
+            }
+        } else {
+            errorAtCurrent("Expect identifier after '@' for compiler directive.");
+        }
     } else {
         statement();
     }
@@ -3248,6 +3583,10 @@ bool compile(const char* source, FunctionPtr* function, const std::string& filen
     initLexer(source);
     parser.hadError = false;
     parser.panicMode = false;
+    parser.autoMainEnabled = true;
+    parser.platformErrorsEnabled = false;
+    parser.explicitMainReferenceSeen = false;
+    parser.osGroup = OsGroup{};
     currentClass = nullptr;
     currentLoop = nullptr;
     currentTry = nullptr;
@@ -3269,6 +3608,10 @@ bool compile(const char* source, FunctionPtr* function, const std::string& filen
     consume(TOKEN_EOF, "Expect end of file.");
     FunctionPtr compiled = endCompiler();
 
+    if (parser.autoMainEnabled && parser.explicitMainReferenceSeen) {
+        errorAt(parser.explicitMainReferenceToken, "Explicit 'main' reference is not allowed when AUTO_MAIN is enabled. Use '@vm AUTO_MAIN false' to disable auto execution.");
+    }
+
     if (function != nullptr) {
         *function = compiled;
     }
@@ -3278,4 +3621,145 @@ bool compile(const char* source, FunctionPtr* function, const std::string& filen
     }
 
     return !parser.hadError;
+}
+
+static void structDeclaration() {
+    Token structName = consume(TOKEN_IDENTIFIER, "Expect struct name after 'struct'.");
+    if (structName.type != TOKEN_IDENTIFIER) {
+        return;
+    }
+
+    consume(TOKEN_LEFT_BRACE, "Expect '{' before struct body.");
+
+    declareVariable(structName, true, "Struct");
+    int structNameConstant = identifierConstant(structName);
+    emitConstantIndex(OP_CLASS, OP_CLASS_LONG, structNameConstant);
+    defineVariable(structNameConstant, true);
+    namedVariable(structName, false);
+
+    ClassCompiler classCompiler;
+    classCompiler.enclosing = currentClass;
+    classCompiler.name = structName;
+    classCompiler.superclassName = structName;
+    classCompiler.hasSuperclass = false;
+    currentClass = &classCompiler;
+
+    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+        bool isStatic = false;
+        bool isPublic = true;
+        
+        while (check(TOKEN_PUBLIC) || check(TOKEN_PRIVATE) || check(TOKEN_STATIC)) {
+            if (match(TOKEN_PUBLIC)) isPublic = true;
+            else if (match(TOKEN_PRIVATE)) isPublic = false;
+            else if (match(TOKEN_STATIC)) isStatic = true;
+        }
+
+        bool isAsync = match(TOKEN_ASYNC);
+
+        if (match(TOKEN_FN)) {
+            Token methodName = consume(TOKEN_IDENTIFIER, "Expect method name.");
+            if (isStatic) {
+                namedVariable(structName, false);
+                FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsync);
+                emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(methodName));
+                emitByte(OP_POP);
+            } else {
+                FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsync);
+                emitConstantIndex(OP_METHOD, OP_METHOD_LONG, identifierConstant(methodName));
+            }
+        } else if (match(TOKEN_STRUCT)) {
+            structDeclaration();
+        } else {
+            bool hasLet = match(TOKEN_LET) || match(TOKEN_CONST);
+            Token fieldName = consume(TOKEN_IDENTIFIER, "Expect field name.");
+            consume(TOKEN_EQUAL, "Expect '=' after field name.");
+            
+            if (isStatic) {
+                namedVariable(structName, false);
+                expression();
+                emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(fieldName));
+                emitByte(OP_POP);
+            } else {
+                expression();
+            }
+            optionalSemicolon();
+        }
+    }
+
+    currentClass = currentClass->enclosing;
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after struct body.");
+
+    if (classCompiler.enclosing != nullptr) {
+        namedVariable(classCompiler.enclosing->name, false);
+        namedVariable(structName, false);
+        emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(structName));
+        emitByte(OP_POP);
+    }
+
+    emitByte(OP_POP);
+}
+
+static void namespaceDeclaration() {
+    Token namespaceName = consume(TOKEN_IDENTIFIER, "Expect namespace name after 'namespace'.");
+    if (namespaceName.type != TOKEN_IDENTIFIER) {
+        return;
+    }
+
+    consume(TOKEN_LEFT_BRACE, "Expect '{' before namespace body.");
+
+    declareVariable(namespaceName, true, "Namespace");
+    int namespaceNameConstant = identifierConstant(namespaceName);
+    emitConstantIndex(OP_CLASS, OP_CLASS_LONG, namespaceNameConstant);
+    defineVariable(namespaceNameConstant, true);
+    namedVariable(namespaceName, false);
+
+    ClassCompiler classCompiler;
+    classCompiler.enclosing = currentClass;
+    classCompiler.name = namespaceName;
+    classCompiler.superclassName = namespaceName;
+    classCompiler.hasSuperclass = false;
+    currentClass = &classCompiler;
+
+    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+        bool isPublic = true;
+        while (check(TOKEN_PUBLIC) || check(TOKEN_PRIVATE) || check(TOKEN_STATIC)) {
+            if (match(TOKEN_PUBLIC)) isPublic = true;
+            else if (match(TOKEN_PRIVATE)) isPublic = false;
+            else if (match(TOKEN_STATIC)) {} // implicit static anyway
+        }
+
+        bool isAsync = match(TOKEN_ASYNC);
+
+        if (match(TOKEN_FN)) {
+            Token methodName = consume(TOKEN_IDENTIFIER, "Expect function name.");
+            namedVariable(namespaceName, false);
+            FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsync);
+            emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(methodName));
+            emitByte(OP_POP);
+        } else if (match(TOKEN_STRUCT)) {
+            structDeclaration();
+        } else {
+            bool hasLet = match(TOKEN_LET) || match(TOKEN_CONST);
+            Token varName = consume(TOKEN_IDENTIFIER, "Expect variable name.");
+            consume(TOKEN_EQUAL, "Expect '=' after variable name.");
+            
+            namedVariable(namespaceName, false);
+            expression();
+            emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(varName));
+            emitByte(OP_POP);
+            optionalSemicolon();
+        }
+    }
+
+    currentClass = currentClass->enclosing;
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after namespace body.");
+
+    if (classCompiler.enclosing != nullptr) {
+        namedVariable(classCompiler.enclosing->name, false);
+        namedVariable(namespaceName, false);
+        emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(namespaceName));
+        emitByte(OP_POP);
+    }
+
+    emitByte(OP_POP);
 }

@@ -1,0 +1,10 @@
+SRC: src/*.cpp
+COMPILER: g++
+STANDARD: C++=17
+OUT: bin/uranium
+
+LIBS: .omake_obj\src\sqlite3.o -lwinhttp -lws2_32 -lgdi32 -lole32 -lcomctl32 -luuid
+
+# -s: Derleme anında otomatik strip yapar (boyutu düşürür)
+# -Wl,--gc-sections: Linker'a "kullanılmayan ne kadar ölü kod varsa çöpe at" der
+TAGS: -O3 -Wall -s -Wl,--gc-sections

@@ -10,12 +10,21 @@ option(URANIUM_DEBUG_PRINT_CODE "Enable bytecode disassembly during compilation.
 set(SOURCES
     src/main.cpp
     src/chunk.cpp
+    src/encoding.cpp
+    src/encoding_native.cpp
+    src/ffi_native.cpp
     src/http_native.cpp
+    src/native_jit_wasm.cpp
     src/godot_native.cpp
     src/gui_native.cpp
     src/heap.cpp
     src/object.cpp
     src/native_jit.cpp
+    src/native_jit_mem.cpp
+    src/native_jit_x64.cpp
+    src/native_jit_arm64.cpp
+    src/native_jit_arm32.cpp
+    src/native_jit_x86.cpp
     src/system_native.cpp
     src/value.cpp
     src/vm.cpp
@@ -33,6 +42,7 @@ set(SOURCES
     src/db_native.cpp
     src/thread_native.cpp
     src/ucpapi_native.cpp
+    src/stdlib_extensions.cpp
     src/sqlite3.c
 )
 

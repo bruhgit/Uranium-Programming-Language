@@ -1,4 +1,14 @@
 #include "vm.h"
+#include "tooling.h"
+
+Value nativeEncodingDecode(int argCount, const Value* args, std::string* errorMessage);
+Value nativeEncodingEncode(int argCount, const Value* args, std::string* errorMessage);
+
+Value nativeFfiLoad(int argCount, const Value* args, std::string* errorMessage);
+Value nativeFfiCall(int argCount, const Value* args, std::string* errorMessage);
+Value nativeFfiUnload(int argCount, const Value* args, std::string* errorMessage);
+
+VM vm;
 #include "common.h"
 #include "compiler.h"
 #include "lexer.h"
@@ -6,8 +16,10 @@
 #include "http_native.h"
 #include "gui_native.h"
 #include "heap.h"
-#include "native_jit.h"
 #include "object.h"
+#include "stdlib_extensions.h"
+#include "value.h"
+#include "native_jit.h"
 #include "optimizer.h"
 #include "system_native.h"
 #include "net_native.h"
@@ -1686,6 +1698,14 @@ Value nativeUnixMillis(int argCount, const Value* args, std::string* errorMessag
     return Value::numberValue(static_cast<double>(millis));
 }
 
+Value nativeFill(int argCount, const Value* args, std::string* errorMessage) {
+    if (argCount != 1) {
+        if (errorMessage) *errorMessage = "fill() takes exactly 1 argument.";
+        return Value::nilValue();
+    }
+    return args[0];
+}
+
 Value nativePrintln(int argCount, const Value* args, std::string* errorMessage) {
     if (!ensureArgCount(argCount, 1, errorMessage)) {
         return Value::nilValue();
@@ -2561,8 +2581,90 @@ ClosurePtr findMethod(const ClassPtr& klass, const std::string& name) {
     return nullptr;
 }
 
+NativeFunctionPtr g_arrayPushMethod = nullptr;
+NativeFunctionPtr g_arrayPopMethod = nullptr;
+NativeFunctionPtr g_arrayInsertMethod = nullptr;
+NativeFunctionPtr g_arrayRemoveMethod = nullptr;
+NativeFunctionPtr g_arrayClearMethod = nullptr;
+
+Value arrayPushNative(int argCount, const Value* args, std::string* errorMessage) {
+    Value receiver = args[-1];
+    ArrayPtr array = receiver.asArray();
+    if (array != nullptr) {
+        array->elements.push_back(args[0]);
+    }
+    return receiver;
+}
+
+Value arrayPopNative(int argCount, const Value* args, std::string* errorMessage) {
+    Value receiver = args[-1];
+    ArrayPtr array = receiver.asArray();
+    if (array == nullptr || array->elements.empty()) {
+        return Value::nilValue();
+    }
+    Value popped = array->elements.back();
+    array->elements.pop_back();
+    return popped;
+}
+
+Value arrayInsertNative(int argCount, const Value* args, std::string* errorMessage) {
+    Value receiver = args[-1];
+    if (!args[0].isNumber() && !args[0].isInt()) {
+        if (errorMessage != nullptr) *errorMessage = "Index must be a number.";
+        return Value::nilValue();
+    }
+    ArrayPtr array = receiver.asArray();
+    if (array == nullptr) return Value::nilValue();
+    int index = static_cast<int>(args[0].isNumber() ? args[0].asNumber() : args[0].asInt());
+    if (index < 0 || index > static_cast<int>(array->elements.size())) {
+        if (errorMessage != nullptr) *errorMessage = "Index out of bounds.";
+        return Value::nilValue();
+    }
+    array->elements.insert(array->elements.begin() + index, args[1]);
+    return receiver;
+}
+
+Value arrayRemoveNative(int argCount, const Value* args, std::string* errorMessage) {
+    Value receiver = args[-1];
+    if (!args[0].isNumber() && !args[0].isInt()) {
+        if (errorMessage != nullptr) *errorMessage = "Index must be a number.";
+        return Value::nilValue();
+    }
+    ArrayPtr array = receiver.asArray();
+    if (array == nullptr) return Value::nilValue();
+    int index = static_cast<int>(args[0].isNumber() ? args[0].asNumber() : args[0].asInt());
+    if (index < 0 || index >= static_cast<int>(array->elements.size())) {
+        if (errorMessage != nullptr) *errorMessage = "Index out of bounds.";
+        return Value::nilValue();
+    }
+    Value removed = array->elements[index];
+    array->elements.erase(array->elements.begin() + index);
+    return removed;
+}
+
+Value arrayClearNative(int argCount, const Value* args, std::string* errorMessage) {
+    Value receiver = args[-1];
+    ArrayPtr array = receiver.asArray();
+    if (array != nullptr) {
+        array->elements.clear();
+    }
+    return receiver;
+}
+
 bool getPropertyValue(const Value& receiver, const std::string& property,
                       Value* result, std::string* errorMessage) {
+    if (property == "is_there") { *result = Value::intValue(receiver.isNil() ? 1 : 0); return true; }
+    if (property == "is_nil") { *result = Value::intValue(receiver.isNil() ? 0 : 1); return true; }
+    if (property == "is_int") { *result = Value::numberValue((receiver.isInt() || (receiver.isNumber() && receiver.asNumber() == std::trunc(receiver.asNumber()))) ? 0 : 1); return true; }
+    if (property == "is_number") { *result = Value::numberValue(receiver.isNumber() ? 0 : 1); return true; }
+    if (property == "is_string") { *result = Value::numberValue(receiver.isString() ? 0 : 1); return true; }
+    if (property == "is_bool") { *result = Value::numberValue(receiver.isBool() ? 0 : 1); return true; }
+    if (property == "is_array") { *result = Value::numberValue(receiver.isArray() ? 0 : 1); return true; }
+    if (property == "is_map") { *result = Value::numberValue(receiver.isMap() ? 0 : 1); return true; }
+    if (property == "is_function") { *result = Value::numberValue((receiver.isClosure() || receiver.isNativeFunction() || receiver.isBoundMethod() || receiver.isFunction()) ? 0 : 1); return true; }
+    if (property == "is_class") { *result = Value::numberValue(receiver.isClass() ? 0 : 1); return true; }
+    if (property == "is_instance") { *result = Value::numberValue(receiver.isInstance() ? 0 : 1); return true; }
+
     if (receiver.isNil()) {
         if (errorMessage != nullptr) {
             *errorMessage = "NullPointerError: Cannot access property '" + property + "' on nil.";
@@ -2616,11 +2718,31 @@ bool getPropertyValue(const Value& receiver, const std::string& property,
             return true;
         }
 
+        auto field = klass->fields.find(property);
+        if (field != klass->fields.end()) {
+            if (field->second.isClosure()) {
+                *result = Value::boundMethodValue(
+                    uraniumHeap().allocateBoundMethod(receiver, field->second.asClosure()));
+            } else {
+                *result = field->second;
+            }
+            return true;
+        }
+
+        auto method = klass->methods.find(property);
+        if (method != klass->methods.end()) {
+            *result = Value::boundMethodValue(
+                uraniumHeap().allocateBoundMethod(receiver, method->second));
+            return true;
+        }
+
         *result = Value::nilValue();
         return true;
     }
 
     if (receiver.isMap()) {
+        if (bindMapMethod(receiver, property, result)) return true;
+
         const MapPtr& map = receiver.asMap();
         if (map == nullptr) {
             *result = Value::nilValue();
@@ -2644,21 +2766,43 @@ bool getPropertyValue(const Value& receiver, const std::string& property,
                 static_cast<double>(array == nullptr ? 0 : array->elements.size()));
             return true;
         }
+        if (property == "push") {
+            *result = Value::boundMethodValue(uraniumHeap().allocateBoundNativeMethod(receiver, g_arrayPushMethod));
+            return true;
+        }
+        if (property == "pop") {
+            *result = Value::boundMethodValue(uraniumHeap().allocateBoundNativeMethod(receiver, g_arrayPopMethod));
+            return true;
+        }
+        if (property == "insert") {
+            *result = Value::boundMethodValue(uraniumHeap().allocateBoundNativeMethod(receiver, g_arrayInsertMethod));
+            return true;
+        }
+        if (property == "remove") {
+            *result = Value::boundMethodValue(uraniumHeap().allocateBoundNativeMethod(receiver, g_arrayRemoveMethod));
+            return true;
+        }
+        if (property == "clear") {
+            *result = Value::boundMethodValue(uraniumHeap().allocateBoundNativeMethod(receiver, g_arrayClearMethod));
+            return true;
+        }
 
         if (errorMessage != nullptr) {
-            *errorMessage = "Arrays only expose the 'length' property.";
+            *errorMessage = "Arrays only expose 'length', 'push', 'pop', 'insert', 'remove', and 'clear' properties.";
         }
         return false;
     }
 
     if (receiver.isString()) {
+        if (bindStringMethod(receiver, property, result)) return true;
+
         if (property == "length") {
             *result = Value::numberValue(static_cast<double>(receiver.asString().size()));
             return true;
         }
 
         if (errorMessage != nullptr) {
-            *errorMessage = "Strings only expose the 'length' property.";
+            *errorMessage = "Strings only expose 'length', 'split', 'replace', 'toUpper', 'toLower', 'trim'.";
         }
         return false;
     }
@@ -2688,6 +2832,20 @@ bool setPropertyValue(const Value& receiver, const std::string& property, const 
 
         instance->fields[property] = assignedValue;
         writeBarrier(instance, assignedValue);
+        return true;
+    }
+
+    if (receiver.isClass()) {
+        const ClassPtr& klass = receiver.asClass();
+        if (klass == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "Cannot assign into an invalid class.";
+            }
+            return false;
+        }
+
+        klass->fields[property] = assignedValue;
+        writeBarrier(klass, assignedValue);
         return true;
     }
 
@@ -2890,6 +3048,14 @@ void VM::defineStringConstant(const std::string& name, const std::string& value)
 }
 
 void VM::registerStandardLibrary() {
+    registerStdlibExtensions();
+    if (g_arrayPushMethod == nullptr) {
+        g_arrayPushMethod = uraniumHeap().allocateNativeFunction("push", 1, arrayPushNative);
+        g_arrayPopMethod = uraniumHeap().allocateNativeFunction("pop", 0, arrayPopNative);
+        g_arrayInsertMethod = uraniumHeap().allocateNativeFunction("insert", 2, arrayInsertNative);
+        g_arrayRemoveMethod = uraniumHeap().allocateNativeFunction("remove", 1, arrayRemoveNative);
+        g_arrayClearMethod = uraniumHeap().allocateNativeFunction("clear", 0, arrayClearNative);
+    }
     defineNative("abs", 1, nativeAbs);
     defineNative("sqrt", 1, nativeSqrt);
     defineNative("pow", 2, nativePow);
@@ -2961,6 +3127,7 @@ void VM::registerStandardLibrary() {
     defineNative("clock", 0, nativeClock);
     defineNative("unixMillis", 0, nativeUnixMillis);
     defineNative("println", 1, nativePrintln);
+    defineNative("fill", 1, nativeFill);
     defineNative("fsCwd", 0, nativeFsCwd);
     defineNative("fsChangeDir", 1, nativeFsChangeDir);
     defineNative("fsExists", 1, nativeFsExists);
@@ -3002,6 +3169,7 @@ void VM::registerStandardLibrary() {
     defineNative("runtimeCapabilities", 0, nativeRuntimeCapabilities);
     defineNative("processPid", 0, nativeProcessPid);
     defineNative("processSleep", 1, nativeProcessSleep);
+    defineNative("input", -1, nativeInput);
     defineNative("processRun", 1, nativeProcessRun);
     defineNative("processSystem", 1, nativeProcessSystem);
     defineNative("processExit", 1, nativeProcessExit);
@@ -3123,6 +3291,15 @@ void VM::registerStandardLibrary() {
     defineNative("threadWorkerError", 1, nativeThreadWorkerError);
     defineNative("threadWorkerWait", 1, nativeThreadWorkerWait);
     
+    // Encoding native bindings
+    defineNative("encodingDecode", 2, nativeEncodingDecode);
+    defineNative("encodingEncode", 2, nativeEncodingEncode);
+
+    // FFI Native bindings
+    defineNative("ffiLoad", 1, nativeFfiLoad);
+    defineNative("ffiCall", 4, nativeFfiCall);
+    defineNative("ffiUnload", 1, nativeFfiUnload);
+
     // UCPAPI Native bindings
     defineNative("ucpapiLoad", 1, nativeUcpLoad);
     defineNative("ucpapiUnload", 1, nativeUcpUnload);
@@ -3570,34 +3747,72 @@ InterpretResult VM::interpret(const FunctionPtr& function) {
     }
 
     // Yürütme tamamlandıktan sonra global 'main' fonksiyonu veya sınıfı var mı kontrol et
-    auto it = globals.find("main");
-    if (it != globals.end()) {
-        Value mainValue = it->second;
-        if (mainValue.isClass() || mainValue.isFunction() || mainValue.isClosure()) {
-            // Yeni bir task oluşturup 'main' çağrısı yapalım
-            // Eğer class ise instantiate etmek için callValue kullanabiliriz
-            resetScheduler();
-            TaskPtr mainTask = createTaskHandle("main");
-            if (!ensureFrameCapacity(mainTask, 1)) {
-                return INTERPRET_RUNTIME_ERROR;
+    bool autoMainEnabled = true;
+    auto autoMainIt = globals.find("@vm_auto_main");
+    if (autoMainIt != globals.end()) {
+        if (autoMainIt->second.isBool()) {
+            autoMainEnabled = autoMainIt->second.asBool();
+        }
+    }
+
+    if (autoMainEnabled) {
+        auto it = globals.find(g_entryPointName);
+        if (it != globals.end()) {
+            Value mainValue = it->second;
+            if (mainValue.isClass() || mainValue.isFunction() || mainValue.isClosure()) {
+                // Yeni bir task oluşturup 'main' çağrısı yapalım
+                // Eğer class ise instantiate etmek için callValue kullanabiliriz
+                resetScheduler();
+                TaskPtr mainTask = createTaskHandle(g_entryPointName);
+                if (!ensureFrameCapacity(mainTask, 1)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                mainTask->observed = true;
+                
+                bool useBasicsEnabled = false;
+                auto useBasicsIt = globals.find("@vm_use_basics");
+                if (useBasicsIt != globals.end() && useBasicsIt->second.isBool()) {
+                    useBasicsEnabled = useBasicsIt->second.asBool();
+                }
+
+                int argCount = 0;
+                if (useBasicsEnabled) {
+                    const std::vector<std::string>& scriptArgs = getRuntimeScriptArgs();
+                    argCount = 2;
+                    if (!ensureTaskStackCapacity(mainTask, 3)) {
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    mainTask->stack[0] = mainValue;
+                    
+                    mainTask->stack[1] = Value::intValue(static_cast<int64_t>(scriptArgs.size()));
+                    
+                    ArrayPtr argvArray = uraniumHeap().allocateArray();
+                    for (const auto& arg : scriptArgs) {
+                        argvArray->elements.push_back(Value::stringValue(arg));
+                    }
+                    mainTask->stack[2] = Value::arrayValue(argvArray);
+                    
+                    mainTask->stackTop = mainTask->stack.data() + 3;
+                } else {
+                    if (!ensureTaskStackCapacity(mainTask, 1)) {
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    mainTask->stack[0] = mainValue;
+                    mainTask->stackTop = mainTask->stack.data() + 1;
+                }
+                
+                currentTask = mainTask;
+                if (!callValue(mainValue, argCount)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                enqueueReadyTask(mainTask);
+                return run();
+            } else {
+                std::cout << "\033[1;33mWarning:\033[0m '" << g_entryPointName << "' is defined but is not callable.\n";
             }
-            mainTask->observed = true;
-            
-            // Stack'e callee'yi yerleştir
-            if (!ensureTaskStackCapacity(mainTask, 1)) {
-                return INTERPRET_RUNTIME_ERROR;
-            }
-            mainTask->stack[0] = mainValue;
-            mainTask->stackTop = mainTask->stack.data() + 1;
-            
-            // callValue çağrısı ile frame hazırlığı yapalım
-            currentTask = mainTask;
-            if (!callValue(mainValue, 0)) {
-                return INTERPRET_RUNTIME_ERROR;
-            }
-            
-            enqueueReadyTask(mainTask);
-            return run();
+        } else {
+            std::cout << "\033[1;33mWarning:\033[0m '" << g_entryPointName << "' function not found. Auto-main execution skipped.\n";
         }
     }
 
@@ -3804,10 +4019,13 @@ bool VM::executeNativeJit(FunctionPtr function,
 
     std::vector<double> numericArgs(static_cast<std::size_t>(function->arity));
     for (int index = 0; index < function->arity; ++index) {
-        if (!initialSlots[index].isNumber()) {
+        if (initialSlots[index].isNumber()) {
+            numericArgs[static_cast<std::size_t>(index)] = initialSlots[index].asNumber();
+        } else if (initialSlots[index].isInt()) {
+            numericArgs[static_cast<std::size_t>(index)] = static_cast<double>(initialSlots[index].asInt());
+        } else {
             return false;
         }
-        numericArgs[static_cast<std::size_t>(index)] = initialSlots[index].asNumber();
     }
 
     using NativeEntry = int (*)(const double* args, double* resultNumber);
@@ -4173,7 +4391,7 @@ bool VM::callNative(const NativeFunctionPtr& function, int argCount) {
         return false;
     }
 
-    if (argCount != function->arity) {
+    if (function->arity != -1 && argCount != function->arity) {
         runtimeError(
             "Native function '" + function->name + "' expected " +
             std::to_string(function->arity) + " argument(s) but got " +
@@ -4607,9 +4825,19 @@ bool VM::callValue(const Value& callee,
 
     if (callee.isBoundMethod()) {
         const BoundMethodPtr& boundMethod = callee.asBoundMethod();
-        if (boundMethod == nullptr || boundMethod->method == nullptr) {
+        if (boundMethod == nullptr || (boundMethod->method == nullptr && boundMethod->nativeMethod == nullptr)) {
             runtimeError("Attempted to call an invalid bound method.");
             return false;
+        }
+
+        if (boundMethod->nativeMethod != nullptr) {
+            if (providedArgNames != nullptr) {
+                runtimeError("Named arguments are not supported for native methods.");
+                return false;
+            }
+            Value* calleeSlot = currentTask->stackTop - argCount - 1;
+            *calleeSlot = boundMethod->receiver;
+            return callNative(boundMethod->nativeMethod, argCount);
         }
 
         FunctionPtr methodFunction =
@@ -4819,7 +5047,7 @@ bool VM::callValue(const Value& callee,
 InterpretResult VM::runtimeError(const std::string& message) {
     std::string trace = buildTaskTrace(currentTask, message);
     if (currentTask == rootTask) {
-        std::cerr << trace << std::endl;
+        std::cerr << "\033[1;31merror:\033[0m " << trace << std::endl;
     }
 
     failTask(currentTask, Value::stringValue(trace));
@@ -4873,6 +5101,7 @@ InterpretResult VM::runTaskSlice() {
 
         int instructionBudget = 512;
         while (instructionBudget-- > 0) {
+            uraniumHeap().collectGarbageStep(2);
             std::string loopBrokerError;
             if (!noteLoopBrokerInstruction(currentTask, &loopBrokerError)) {
                 return runtimeError(loopBrokerError);
@@ -5517,8 +5746,8 @@ InterpretResult VM::runTaskSlice() {
                         break;
                     }
 
-                    if (a.isString() && b.isString()) {
-                        push(Value::stringValue(a.asString() + b.asString()));
+                    if (a.isString() || b.isString()) {
+                        push(Value::stringValue(valueToString(a) + valueToString(b)));
                         break;
                     }
 
@@ -5711,6 +5940,10 @@ InterpretResult VM::runTaskSlice() {
                     break;
                 }
                 case OP_PRINT: {
+                    printValue(pop());
+                    break;
+                }
+                case OP_PRINTN: {
                     printValue(pop());
                     std::cout << std::endl;
                     break;

@@ -20,6 +20,8 @@ extern std::size_t g_baseYoungBytes;
 extern std::size_t g_baseFullBytes;
 extern int g_maxFrames;
 extern bool g_vmDebugMode;
+extern std::string g_entryPointName;
+extern int g_umakeJobs;
 
 extern std::wstring g_compileIconPath;
 extern std::wstring g_compileCompanyName;

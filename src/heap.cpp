@@ -2,8 +2,10 @@
 #include "common.h"
 #include <algorithm>
 #include <new>
+#include <mutex>
 
 namespace {
+std::mutex allocMutex;
 
 template <typename T>
 T* linkObject(HeapObject** objects,
@@ -41,7 +43,11 @@ Heap::Heap()
       minorCollections(0),
       fullCollections(0),
       minorCollectionsSinceFull(0),
-      lastMode(HEAP_COLLECT_FULL) {
+      lastMode(HEAP_COLLECT_FULL),
+      gcState(GC_STATE_IDLE),
+      currentStepMode(HEAP_COLLECT_FULL),
+      sweepPointer(nullptr),
+      sweepPrevious(nullptr) {
     grayStack.reserve(256);
 }
 
@@ -72,6 +78,7 @@ Heap::~Heap() {
 }
 
 FunctionPtr Heap::allocateFunction(const std::string& name, int arity) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     FunctionObject* obj;
     if (!poolFunction.empty()) {
         obj = new (poolFunction.back()) FunctionObject(name, arity);
@@ -84,6 +91,7 @@ FunctionPtr Heap::allocateFunction(const std::string& name, int arity) {
 }
 
 ClosurePtr Heap::allocateClosure(FunctionPtr function) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     ClosureObject* obj;
     if (!poolClosure.empty()) {
         obj = new (poolClosure.back()) ClosureObject(function);
@@ -96,6 +104,7 @@ ClosurePtr Heap::allocateClosure(FunctionPtr function) {
 }
 
 UpvaluePtr Heap::allocateUpvalue(Value* slot) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     UpvalueObject* obj;
     if (!poolUpvalue.empty()) {
         obj = new (poolUpvalue.back()) UpvalueObject(slot);
@@ -122,6 +131,7 @@ NativeFunctionPtr Heap::allocateNativeFunction(const std::string& name,
 }
 
 ArrayPtr Heap::allocateArray() {
+    std::lock_guard<std::mutex> lock(allocMutex);
     ArrayObject* obj;
     if (!poolArray.empty()) {
         obj = new (poolArray.back()) ArrayObject();
@@ -134,6 +144,7 @@ ArrayPtr Heap::allocateArray() {
 }
 
 MapPtr Heap::allocateMap() {
+    std::lock_guard<std::mutex> lock(allocMutex);
     MapObject* obj;
     if (!poolMap.empty()) {
         obj = new (poolMap.back()) MapObject();
@@ -146,6 +157,7 @@ MapPtr Heap::allocateMap() {
 }
 
 ClassPtr Heap::allocateClass(const std::string& name) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     ClassObject* obj;
     if (!poolClass.empty()) {
         obj = new (poolClass.back()) ClassObject(name);
@@ -158,6 +170,7 @@ ClassPtr Heap::allocateClass(const std::string& name) {
 }
 
 InstancePtr Heap::allocateInstance(ClassPtr klass) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     InstanceObject* obj;
     if (!poolInstance.empty()) {
         obj = new (poolInstance.back()) InstanceObject(klass);
@@ -170,6 +183,20 @@ InstancePtr Heap::allocateInstance(ClassPtr klass) {
 }
 
 BoundMethodPtr Heap::allocateBoundMethod(const Value& receiver, ClosurePtr method) {
+    std::lock_guard<std::mutex> lock(allocMutex);
+    BoundMethodObject* obj;
+    if (!poolBoundMethod.empty()) {
+        obj = new (poolBoundMethod.back()) BoundMethodObject(receiver, method);
+        poolBoundMethod.pop_back();
+    } else {
+        obj = new BoundMethodObject(receiver, method);
+    }
+    return linkObject(&objects, &liveObjects, &bytesAllocated,
+                      &youngObjects, &youngBytesAllocated, obj);
+}
+
+BoundMethodPtr Heap::allocateBoundNativeMethod(const Value& receiver, NativeFunctionPtr method) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     BoundMethodObject* obj;
     if (!poolBoundMethod.empty()) {
         obj = new (poolBoundMethod.back()) BoundMethodObject(receiver, method);
@@ -274,6 +301,9 @@ void Heap::blackenObject(HeapObject* object) {
             for (const auto& entry : klass->methods) {
                 markObject(entry.second);
             }
+            for (const auto& field : klass->fields) {
+                markValue(field.second);
+            }
             break;
         }
         case OBJ_INSTANCE: {
@@ -288,6 +318,7 @@ void Heap::blackenObject(HeapObject* object) {
             BoundMethodObject* boundMethod = static_cast<BoundMethodObject*>(object);
             markValue(boundMethod->receiver);
             markObject(boundMethod->method);
+            markObject(boundMethod->nativeMethod);
             break;
         }
     }
@@ -389,6 +420,7 @@ void Heap::sweep(HeapCollectionMode mode) {
 }
 
 void Heap::collectGarbage(HeapCollectionMode mode) {
+    std::lock_guard<std::mutex> lock(allocMutex);
     if (mode == HEAP_COLLECT_YOUNG) {
         markRememberedObjects();
     }
@@ -424,6 +456,149 @@ void Heap::collectGarbage(HeapCollectionMode mode) {
     } else {
         minorCollections++;
         minorCollectionsSinceFull++;
+    }
+}
+
+void Heap::collectGarbageStep(std::size_t workLimit) {
+    std::lock_guard<std::mutex> lock(allocMutex);
+    if (gcState == GC_STATE_IDLE) {
+        if (shouldCollectFull()) {
+            currentStepMode = HEAP_COLLECT_FULL;
+            gcState = GC_STATE_MARKING;
+        } else if (shouldCollectYoung()) {
+            currentStepMode = HEAP_COLLECT_YOUNG;
+            gcState = GC_STATE_MARKING;
+        } else {
+            return;
+        }
+
+        if (currentStepMode == HEAP_COLLECT_YOUNG) {
+            markRememberedObjects();
+        }
+    }
+
+    if (gcState == GC_STATE_MARKING) {
+        std::size_t workDone = 0;
+        while (!grayStack.empty() && workDone < workLimit) {
+            HeapObject* object = grayStack.back();
+            grayStack.pop_back();
+            blackenObject(object);
+            workDone++;
+        }
+
+        if (grayStack.empty()) {
+            gcState = GC_STATE_SWEEPING;
+            sweepPointer = objects;
+            sweepPrevious = nullptr;
+        }
+        return;
+    }
+
+    if (gcState == GC_STATE_SWEEPING) {
+        std::size_t workDone = 0;
+        while (sweepPointer != nullptr && workDone < workLimit) {
+            HeapObject* object = sweepPointer;
+            if (object->isMarked) {
+                object->isMarked = false;
+                if (!object->isOldGeneration) {
+                    if (object->age < 255) {
+                        object->age++;
+                    }
+                    if (object->age >= 2) {
+                        object->isOldGeneration = true;
+                    }
+                }
+                sweepPrevious = object;
+                sweepPointer = object->next;
+            } else if (currentStepMode == HEAP_COLLECT_YOUNG && object->isOldGeneration) {
+                sweepPrevious = object;
+                sweepPointer = object->next;
+            } else {
+                HeapObject* unreached = object;
+                sweepPointer = object->next;
+
+                if (sweepPrevious == nullptr) {
+                    objects = sweepPointer;
+                } else {
+                    sweepPrevious->next = sweepPointer;
+                }
+
+                switch (unreached->objType) {
+                    case OBJ_FUNCTION:
+                        static_cast<FunctionObject*>(unreached)->~FunctionObject();
+                        poolFunction.push_back(unreached);
+                        break;
+                    case OBJ_CLOSURE:
+                        static_cast<ClosureObject*>(unreached)->~ClosureObject();
+                        poolClosure.push_back(unreached);
+                        break;
+                    case OBJ_UPVALUE:
+                        static_cast<UpvalueObject*>(unreached)->~UpvalueObject();
+                        poolUpvalue.push_back(unreached);
+                        break;
+                    case OBJ_NATIVE_FUNCTION:
+                        static_cast<NativeFunctionObject*>(unreached)->~NativeFunctionObject();
+                        poolNativeFunction.push_back(unreached);
+                        break;
+                    case OBJ_ARRAY:
+                        static_cast<ArrayObject*>(unreached)->~ArrayObject();
+                        poolArray.push_back(unreached);
+                        break;
+                    case OBJ_MAP:
+                        static_cast<MapObject*>(unreached)->~MapObject();
+                        poolMap.push_back(unreached);
+                        break;
+                    case OBJ_CLASS:
+                        static_cast<ClassObject*>(unreached)->~ClassObject();
+                        poolClass.push_back(unreached);
+                        break;
+                    case OBJ_INSTANCE:
+                        static_cast<InstanceObject*>(unreached)->~InstanceObject();
+                        poolInstance.push_back(unreached);
+                        break;
+                    case OBJ_BOUND_METHOD:
+                        static_cast<BoundMethodObject*>(unreached)->~BoundMethodObject();
+                        poolBoundMethod.push_back(unreached);
+                        break;
+                }
+                liveObjects--;
+            }
+            workDone++;
+        }
+
+        if (sweepPointer == nullptr) {
+            if (currentStepMode == HEAP_COLLECT_FULL) {
+                for (HeapObject* obj : rememberedSet) {
+                    if (obj != nullptr) {
+                        obj->isRemembered = false;
+                    }
+                }
+                rememberedSet.clear();
+            } else {
+                rememberedSet.erase(
+                    std::remove_if(
+                        rememberedSet.begin(),
+                        rememberedSet.end(),
+                        [](HeapObject* obj) {
+                            return obj == nullptr || !obj->isRemembered || !obj->isOldGeneration;
+                        }),
+                    rememberedSet.end());
+            }
+
+            refreshAccounting();
+            lastMode = currentStepMode;
+            totalCollections++;
+
+            if (currentStepMode == HEAP_COLLECT_FULL) {
+                fullCollections++;
+                minorCollectionsSinceFull = 0;
+            } else {
+                minorCollections++;
+                minorCollectionsSinceFull++;
+            }
+
+            gcState = GC_STATE_IDLE;
+        }
     }
 }
 
@@ -592,6 +767,10 @@ std::size_t Heap::estimateObjectSize(const HeapObject* object) const {
                 total += sizeof(entry);
                 total += entry.first.capacity();
             }
+            for (const auto& entry : klass->fields) {
+                total += sizeof(entry);
+                total += entry.first.capacity();
+            }
             return total;
         }
         case OBJ_INSTANCE: {
@@ -642,3 +821,4 @@ Heap& uraniumHeap() {
     thread_local Heap heap;
     return heap;
 }
+

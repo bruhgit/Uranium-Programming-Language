@@ -1,15 +1,13 @@
-fn encodeBase64(text) {
-return base64Encode(text)
+// Encoding module for Uranium
+
+// Decodes a binary string into a UTF-8 string according to the specified encoding type.
+// Supported types: "utf-8", "utf-16le", "utf-16be", "utf-32le", "utf-32be", "iso-8859-1" (or "ascii").
+fn decode(data, type) {
+    return encodingDecode(data, type)
 }
 
-fn decodeBase64(text) {
-return base64Decode(text)
-}
-
-fn encode64(text) {
-return encodeBase64(text)
-}
-
-fn decode64(text) {
-return decodeBase64(text)
+// Encodes a UTF-8 string into a binary string according to the specified encoding type.
+// Supported types: "utf-8", "utf-16le", "utf-16be", "utf-32le", "utf-32be", "iso-8859-1" (or "ascii").
+fn encode(text, type) {
+    return encodingEncode(text, type)
 }

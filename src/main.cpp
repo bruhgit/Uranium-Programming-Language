@@ -13,6 +13,8 @@
 #include "system_native.h"
 #include "urc.h"
 #include "vm.h"
+#include "native_jit.h"
+#include "optimizer.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +42,14 @@ static bool directoryExists(const std::filesystem::path& path) {
 static bool isDirectoryEmpty(const std::filesystem::path& path) {
     std::error_code errorCode;
     return std::filesystem::is_empty(path, errorCode);
+}
+
+static bool isAbsolutePath(const std::filesystem::path& path) {
+    if (path.empty()) return false;
+    if (path.is_absolute()) return true;
+    std::string s = path.generic_string();
+    if (s[0] == '/') return true;
+    return false;
 }
 
 static std::filesystem::path canonicalizePath(const std::filesystem::path& path) {
@@ -85,7 +95,7 @@ static bool endsWith(const std::string& value, const std::string& suffix) {
 
 static std::filesystem::path searchUpwardForFile(const std::filesystem::path& startDirectory,
                                                  const std::filesystem::path& relativePath) {
-    if (startDirectory.empty() || relativePath.empty() || relativePath.is_absolute()) {
+    if (startDirectory.empty() || relativePath.empty() || isAbsolutePath(relativePath)) {
         return {};
     }
 
@@ -108,7 +118,7 @@ static std::filesystem::path searchUpwardForFile(const std::filesystem::path& st
 
 static std::filesystem::path searchUpwardForExistingPath(const std::filesystem::path& startDirectory,
                                                          const std::filesystem::path& relativePath) {
-    if (startDirectory.empty() || relativePath.empty() || relativePath.is_absolute()) {
+    if (startDirectory.empty() || relativePath.empty() || isAbsolutePath(relativePath)) {
         return {};
     }
 
@@ -131,7 +141,7 @@ static std::filesystem::path searchUpwardForExistingPath(const std::filesystem::
 
 static std::filesystem::path resolveInputPath(const std::filesystem::path& rawPath,
                                               const std::filesystem::path& executablePath) {
-    if (rawPath.is_absolute()) {
+    if (isAbsolutePath(rawPath)) {
         return canonicalizePath(rawPath);
     }
 
@@ -156,7 +166,7 @@ static std::filesystem::path resolveInputPath(const std::filesystem::path& rawPa
 
 static std::filesystem::path resolveExistingPath(const std::filesystem::path& rawPath,
                                                  const std::filesystem::path& executablePath) {
-    if (rawPath.is_absolute()) {
+    if (isAbsolutePath(rawPath)) {
         return canonicalizePath(rawPath);
     }
 
@@ -423,7 +433,7 @@ static int compileRunnableToBinary(const std::filesystem::path& rawInputPath,
     if (rawOutputPath.empty()) {
         outputPath = defaultAotOutputPath(inputPath);
     } else {
-        outputPath = rawOutputPath.is_absolute()
+        outputPath = isAbsolutePath(rawOutputPath)
                          ? rawOutputPath
                          : canonicalizePath(std::filesystem::current_path() / rawOutputPath);
         if (directoryExists(outputPath)) {
@@ -601,7 +611,7 @@ static std::filesystem::path resolveRegistryRoot(const std::filesystem::path& ra
 static int initializeRegistry(const std::filesystem::path& rawTarget,
                               const std::filesystem::path& executablePath) {
     (void)executablePath;
-    std::filesystem::path registryRoot = rawTarget.is_absolute()
+    std::filesystem::path registryRoot = isAbsolutePath(rawTarget)
                                              ? rawTarget
                                              : canonicalizePath(std::filesystem::current_path() / rawTarget);
     std::string errorMessage;
@@ -747,7 +757,7 @@ static int packPackage(const std::filesystem::path& rawTarget,
     }
 
     std::filesystem::path entryPath = std::filesystem::path(manifest.entry);
-    if (!entryPath.is_absolute()) {
+    if (!isAbsolutePath(entryPath)) {
         entryPath = packageRoot / entryPath;
     }
     entryPath = canonicalizePath(entryPath);
@@ -778,7 +788,7 @@ static int packPackage(const std::filesystem::path& rawTarget,
     if (rawOutput.empty()) {
         archivePath = archivePathForPackage(packageRoot, manifest.name);
     } else {
-        archivePath = rawOutput.is_absolute()
+        archivePath = isAbsolutePath(rawOutput)
             ? rawOutput
             : canonicalizePath(std::filesystem::current_path() / rawOutput);
         if (directoryExists(archivePath)) {
@@ -940,7 +950,7 @@ static bool writeTextFile(const std::filesystem::path& path,
 }
 
 static int initPackage(const std::filesystem::path& rawTarget) {
-    std::filesystem::path packagePath = rawTarget.is_absolute()
+    std::filesystem::path packagePath = isAbsolutePath(rawTarget)
                                             ? rawTarget
                                             : std::filesystem::current_path() / rawTarget;
     packagePath = canonicalizePath(packagePath);
@@ -1054,6 +1064,8 @@ std::size_t g_baseYoungBytes = 64 * 1024;
 std::size_t g_baseFullBytes = 512 * 1024;
 int g_maxFrames = 100000;
 bool g_vmDebugMode = false;
+std::string g_entryPointName = "main";
+int g_umakeJobs = 1;
 
 int g_optimizerLevel = 0;
 
@@ -1194,6 +1206,8 @@ static void printUsage() {
         << "  --O3                     Aggressive optimizations (O2 + strength reduction, NOP compaction)\n"
         << "\nVM Options:\n"
         << "  --vm-debug-mode          Enable execution instruction debug tracing\n"
+        << "  -j <N>                   Run N jobs in parallel for Umake\n"
+        << "  -e, --entry <function>   Set the auto-main entry point (default: main)\n"
         << "  --gc <size>              Set young/full collection threshold (e.g. 64K, 1M)\n"
         << "  --vm <size>              Set maximum heap memory limit (e.g. 10M, 1G)\n"
         << "  --re <limit>             Set maximum recursion call frame limit\n"
@@ -1206,6 +1220,23 @@ static void printUsage() {
 }
 
 int main(int argc, const char* argv[]) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    if (hErr != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hErr, &dwMode)) {
+            SetConsoleMode(hErr, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+#endif
     std::filesystem::path executablePath = canonicalizePath(argv[0]);
 
     // Parse and filter options
@@ -1213,6 +1244,7 @@ int main(int argc, const char* argv[]) {
     filteredArgs.push_back(argv[0]);
 
     bool vmDebugMode = false;
+    bool targetWasm = false;
     std::string gcSizeStr = "";
     std::string vmSizeStr = "";
     std::string reLimitStr = "";
@@ -1229,6 +1261,8 @@ int main(int argc, const char* argv[]) {
         std::string arg = argv[index];
         if (arg == "--vm-debug-mode") {
             vmDebugMode = true;
+        } else if (arg == "--target=wasm") {
+            targetWasm = true;
         } else if (arg == "--compile-urc") {
             compileUrc = true;
         } else if (arg == "--O0") {
@@ -1239,6 +1273,16 @@ int main(int argc, const char* argv[]) {
             g_optimizerLevel = 2;
         } else if (arg == "--O3") {
             g_optimizerLevel = 3;
+        } else if ((arg == "-e" || arg == "--entry") && index + 1 < argc) {
+            g_entryPointName = argv[++index];
+        } else if (arg == "-j" && index + 1 < argc) {
+            try {
+                g_umakeJobs = std::stoi(argv[++index]);
+                if (g_umakeJobs < 1) g_umakeJobs = 1;
+            } catch (...) {
+                std::cerr << "Invalid -j value: " << argv[index] << std::endl;
+                return 64;
+            }
         } else if (arg == "--gc" && index + 1 < argc) {
             gcSizeStr = argv[++index];
         } else if (arg == "--vm" && index + 1 < argc) {
@@ -1323,6 +1367,33 @@ int main(int argc, const char* argv[]) {
         return 0;
     }
 
+    if (targetWasm) {
+        if (newArgc < 2) {
+            std::cerr << "Usage: uranium --target=wasm <path>\n";
+            return 64;
+        }
+        std::filesystem::path inputPath = newArgv[1];
+        std::filesystem::path workspaceRoot = findWorkspaceRoot(inputPath, executablePath);
+        FunctionPtr function = nullptr;
+        std::string errorMessage;
+        if (compileSourceProgram(inputPath, workspaceRoot, &function, &errorMessage) != 0) {
+            std::cerr << errorMessage << std::endl;
+            return 65;
+        }
+        FastPathPlan plan;
+        if (!buildFastPathPlan(function, &plan, &errorMessage)) {
+            std::cerr << "Optimizer Error: " << errorMessage << std::endl;
+            return 65;
+        }
+
+        NativeJitArtifact artifact;
+        if (!compileNativeJit(function, plan, &artifact, &errorMessage, true)) {
+            std::cerr << errorMessage << std::endl;
+            return 65;
+        }
+        return 0;
+    }
+
     if (compileUrc) {
         if (newArgc < 2) {
             std::cerr << "Usage: uranium --compile-urc <path> [-out <output.urc>]\n";
@@ -1369,7 +1440,9 @@ int main(int argc, const char* argv[]) {
 
     std::string argument = argv[1];
     if (argument == "--version") {
-        std::cout << "Uranium Compiler V3 from omerdev (and community!)\n";
+        std::cout << "Copyright (C) 2026 Uranium Programming Language\n";
+        std::cout << "This project author is : omerdev\n";
+        std::cout << "License : GPLv3\n";
         return 0;
     }
 

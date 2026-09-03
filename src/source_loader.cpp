@@ -6,8 +6,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#else
-#include <unistd.h> // added unistd.h
 #endif
 #include <algorithm>
 #include <cctype>
@@ -121,6 +119,14 @@ bool directoryExists(const std::filesystem::path& path) {
            std::filesystem::is_directory(path, errorCode);
 }
 
+static bool isAbsolutePath(const std::filesystem::path& path) {
+    if (path.empty()) return false;
+    if (path.is_absolute()) return true;
+    std::string s = path.generic_string();
+    if (s[0] == '/') return true;
+    return false;
+}
+
 std::filesystem::path canonicalize(const std::filesystem::path& path) {
     std::error_code errorCode;
     std::filesystem::path result = std::filesystem::weakly_canonical(path, errorCode);
@@ -142,14 +148,14 @@ bool readFileText(const std::filesystem::path& path,
         *content = "";
         return true;
     }
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return setError(errorMessage, "Could not open import file '" + path.string() + "'.");
     }
 
     std::stringstream buffer;
     buffer << file.rdbuf();
-    *content = buffer.str();
+    *content = uranium::encoding::decodeSourceFile(buffer.str());
     return true;
 }
 
@@ -454,7 +460,10 @@ bool resolveImportPath(const std::string& spec,
 
     if (spec.size() >= 2 && spec.front() == '"' && spec.back() == '"') {
         std::string rawPath = spec.substr(1, spec.size() - 2);
-        std::filesystem::path candidate = importerPath.parent_path() / rawPath;
+        std::filesystem::path rawPathPath(rawPath);
+        std::filesystem::path candidate = isAbsolutePath(rawPathPath)
+                                              ? rawPathPath
+                                              : (importerPath.parent_path() / rawPathPath);
 
         if (candidate.extension().empty()) {
             candidate += ".ur";

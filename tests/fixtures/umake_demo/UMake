@@ -1,0 +1,4 @@
+SCRIPT = write_marker.ur
+include build.umake
+
+default: build

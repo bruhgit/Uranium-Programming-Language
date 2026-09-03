@@ -295,6 +295,8 @@ int disassembleInstructionToStream(std::ostream& stream, Chunk* chunk, int offse
             return simpleInstruction(stream, "OP_NEGATE", offset);
         case OP_PRINT:
             return simpleInstruction(stream, "OP_PRINT", offset);
+        case OP_PRINTN:
+            return simpleInstruction(stream, "OP_PRINTN", offset);
         case OP_RETURN:
             return simpleInstruction(stream, "OP_RETURN", offset);
         default:

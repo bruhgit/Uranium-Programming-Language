@@ -1,0 +1,16 @@
+# OMake Build Presets for Uranium
+# Run with: .\omake\omake.exe --preset <name>
+
+[debug]
+PROFILE: debug
+COMPILER: g++
+TAGS: -g -std=c++17 -Wall -Wextra
+LIBS: -lws2_32 -ladvapi32 -lwinhttp -lcomdlg32
+DEFINES: URANIUM_DEBUG_TRACE=0
+
+[release]
+PROFILE: release
+COMPILER: g++
+TAGS: -O3 -std=c++17 -Wall -Wextra -flto
+LIBS: -lws2_32 -ladvapi32 -lwinhttp -lcomdlg32
+DEFINES: NDEBUG=1

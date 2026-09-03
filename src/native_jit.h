@@ -17,6 +17,7 @@ struct NativeJitArtifact {
 bool compileNativeJit(const FunctionPtr& function,
                       const FastPathPlan& plan,
                       NativeJitArtifact* artifact,
-                      std::string* reason);
+                      std::string* reason,
+                      bool targetWasm = false);
 
 #endif

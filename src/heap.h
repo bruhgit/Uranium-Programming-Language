@@ -11,9 +11,14 @@ enum HeapCollectionMode {
     HEAP_COLLECT_YOUNG,
     HEAP_COLLECT_FULL,
 };
-
 class Heap {
 public:
+    enum GcState {
+        GC_STATE_IDLE,
+        GC_STATE_MARKING,
+        GC_STATE_SWEEPING
+    };
+
     Heap();
     ~Heap();
 
@@ -26,11 +31,13 @@ public:
     ClassPtr allocateClass(const std::string& name);
     InstancePtr allocateInstance(ClassPtr klass);
     BoundMethodPtr allocateBoundMethod(const Value& receiver, ClosurePtr method);
+    BoundMethodPtr allocateBoundNativeMethod(const Value& receiver, NativeFunctionPtr method);
 
     void markValue(const Value& value);
     void markObject(HeapObject* object);
     void writeBarrier(HeapObject* owner, const Value& value);
     void collectGarbage(HeapCollectionMode mode = HEAP_COLLECT_FULL);
+    void collectGarbageStep(std::size_t workLimit = 10); // Incremental step function
     bool shouldCollectYoung() const;
     bool shouldCollectFull() const;
     std::size_t objectCount() const;
@@ -47,6 +54,7 @@ public:
     std::size_t fullCollectionCount() const;
     std::size_t rememberedObjectCount() const;
     HeapCollectionMode lastCollectionMode() const;
+    GcState currentGcState() const { return gcState; }
 
 private:
     HeapObject* objects;
@@ -65,6 +73,12 @@ private:
     HeapCollectionMode lastMode;
     std::vector<HeapObject*> grayStack;
     std::vector<HeapObject*> rememberedSet;
+    
+    // Incremental Sweep state trackers
+    GcState gcState;
+    HeapCollectionMode currentStepMode;
+    HeapObject* sweepPointer;
+    HeapObject* sweepPrevious;
 
     std::vector<void*> poolFunction;
     std::vector<void*> poolClosure;

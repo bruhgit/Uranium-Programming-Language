@@ -61,6 +61,7 @@ enum OpCode {
     OP_LOOP,
     OP_NEGATE,
     OP_PRINT,
+    OP_PRINTN,
     OP_RETURN,
     OP_CLOSURE,
     OP_CLOSURE_LONG,

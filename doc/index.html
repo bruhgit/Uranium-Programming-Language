@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Uranium Programming Language Reference Manual</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0b0f19;
+            --bg-secondary: #161b26;
+            --bg-tertiary: #1f2635;
+            --accent-color: #00ff66;
+            --accent-glow: rgba(0, 255, 102, 0.15);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --font-sans: 'Inter', sans-serif;
+            --font-mono: 'Fira Code', monospace;
+            --sidebar-width: 320px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            line-height: 1.6;
+            overflow-x: hidden;
+            display: flex;
+        }
+
+        /* Sidebar Styling */
+        .sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            position: fixed;
+            top: 0;
+            left: 0;
+            overflow-y: auto;
+            padding: 2.5rem 1.5rem;
+            z-index: 100;
+        }
+
+        .logo-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 3rem;
+        }
+
+        .logo-area h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            letter-spacing: -0.05em;
+            color: var(--text-primary);
+        }
+
+        .logo-area span {
+            color: var(--accent-color);
+            text-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .nav-section {
+            margin-bottom: 2rem;
+        }
+
+        .nav-section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            padding-left: 0.5rem;
+        }
+
+        .nav-links {
+            list-style: none;
+        }
+
+        .nav-links a {
+            display: block;
+            padding: 0.5rem 0.75rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            margin-bottom: 0.25rem;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+            background-color: var(--bg-tertiary);
+            padding-left: 1rem;
+        }
+
+        .nav-links a.active {
+            color: var(--accent-color);
+            background-color: rgba(0, 255, 102, 0.05);
+            font-weight: 600;
+            border-left: 2px solid var(--accent-color);
+        }
+
+        /* Main Content Styling */
+        .content {
+            margin-left: var(--sidebar-width);
+            padding: 4rem 6rem;
+            max-width: 1000px;
+            width: calc(100% - var(--sidebar-width));
+        }
+
+        section {
+            margin-bottom: 5rem;
+            scroll-margin-top: 4rem;
+        }
+
+        h2 {
+            font-size: 2.25rem;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.5rem;
+            color: var(--text-primary);
+        }
+
+        h3 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        p {
+            font-size: 1.05rem;
+            color: var(--text-secondary);
+            margin-bottom: 1.5rem;
+            font-weight: 400;
+        }
+
+        /* Code Blocks styling */
+        pre {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin-bottom: 1.5rem;
+            position: relative;
+        }
+
+        code {
+            font-family: var(--font-mono);
+            font-size: 0.925rem;
+            color: #d1d5db;
+        }
+
+        /* Inline code */
+        :not(pre) > code {
+            background-color: var(--bg-tertiary);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            color: var(--accent-color);
+            font-size: 0.9em;
+        }
+
+        /* Info boxes/Alerts */
+        .alert {
+            background-color: var(--bg-secondary);
+            border-left: 4px solid var(--accent-color);
+            border-radius: 0 8px 8px 0;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .alert-title {
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Table styling */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 2rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        th, td {
+            padding: 1rem 1.25rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: var(--bg-secondary);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Scrollbar customizing */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Navigation -->
+    <div class="sidebar">
+        <div class="logo-area">
+            <h1>Uranium<span>.</span></h1>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">Introduction</div>
+            <ul class="nav-links">
+                <li><a href="#about" class="active">About Uranium</a></li>
+                <li><a href="#getting-started">Getting Started</a></li>
+            </ul>
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Language Syntax</div>
+            <ul class="nav-links">
+                <li><a href="#variables">Variables & Types</a></li>
+                <li><a href="#control-flow">Control Flow</a></li>
+                <li><a href="#functions">Functions</a></li>
+                <li><a href="#classes">Classes & OOP</a></li>
+            </ul>
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Advanced Runtime</div>
+            <ul class="nav-links">
+                <li><a href="#jit">Native JIT Compiler</a></li>
+                <li><a href="#gc">Incremental GC</a></li>
+                <li><a href="#ucpapi">UCPAPI (C FFI)</a></li>
+            </ul>
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Standard Library</div>
+            <ul class="nav-links">
+                <li><a href="#std-collections">std.collections</a></li>
+                <li><a href="#native-gui">Native GUI API</a></li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="content">
+        
+        <!-- Section: About -->
+        <section id="about">
+            <h2>About Uranium</h2>
+            <p>Uranium is a modern, high-performance, stack-based bytecode programming language designed for ultimate execution speed, small runtime footprint, and multi-platform versatility. It merges the ergonomics of modern high-level languages with the extreme speed of a native compilation pipeline.</p>
+            
+            <div class="alert">
+                <div class="alert-title">
+                    ⚡ Core Highlights
+                </div>
+                <p>Uranium features a multi-architecture JIT compiler compiling hot paths directly into machine code, a low-latency Tri-color Incremental Garbage Collector, and a powerful C Programming API (UCPAPI) for native library FFI.</p>
+            </div>
+        </section>
+
+        <!-- Section: Getting Started -->
+        <section id="getting-started">
+            <h2>Getting Started</h2>
+            <p>Uranium uses an independent build orchestrator called <code>OMake</code> alongside traditional CMake configurations.</p>
+            
+            <h3>Compilation</h3>
+            <p>To compile Uranium from sources with maximum parallel execution and zero warnings:</p>
+            <pre><code># Using OMake with debug preset
+.\omake\omake.exe --preset debug --build
+
+# Using OMake with release preset (high optimization)
+.\omake\omake.exe --preset release --build</code></pre>
+
+            <h3>Execution</h3>
+            <p>Run files using the compiled interpreter binary:</p>
+            <pre><code>./bin/uranium main.ur</code></pre>
+        </section>
+
+        <!-- Section: Variables -->
+        <section id="variables">
+            <h2>Variables & Types</h2>
+            <p>Uranium supports dynamic typing with explicit promotions for performance critical operations. Variables are defined using the <code>let</code> keyword.</p>
+            <pre><code>let integerVar = 100       // VAL_INT (64-bit signed integer)
+let floatVar = 3.14        // VAL_NUMBER (double)
+let stringVar = "Uranium"  // VAL_STRING (string)
+let boolVar = true         // VAL_BOOL (boolean)
+let arrayVar = [1, 2, 3]   // VAL_ARRAY (dynamic array)
+let mapVar = map()         // VAL_MAP (dictionary)</code></pre>
+        </section>
+
+        <!-- Section: Control Flow -->
+        <section id="control-flow">
+            <h2>Control Flow</h2>
+            <p>Control flow structures use traditional C-like blocks with dynamic expression evaluations.</p>
+            
+            <h3>If-Else Conditions</h3>
+            <pre><code>let score = 85
+if (score >= 90) {
+    print("Excellent")
+} elif (score >= 70) {
+    print("Pass")
+} else {
+    print("Fail")
+}</code></pre>
+
+            <h3>For Loops</h3>
+            <pre><code>for (let i = 0, i < 10, i = i + 1) {
+    print("Iteration: " + str(i))
+}</code></pre>
+        </section>
+
+        <!-- Section: Functions -->
+        <section id="functions">
+            <h2>Functions</h2>
+            <p>Functions are defined using the <code>fn</code> keyword and support closure scopes and parameter type annotations.</p>
+            <pre><code>fn calculateArea(width, height) {
+    return width * height
+}
+
+// Function call
+let area = calculateArea(10, 20)</code></pre>
+        </section>
+
+        <!-- Section: Classes -->
+        <section id="classes">
+            <h2>Classes & OOP</h2>
+            <p>Uranium features class-based object-oriented programming with constructors, properties, and methods.</p>
+            <pre><code>class Player() {
+    fn init(name, score) {
+        this.name = name
+        this.score = score
+    }
+
+    fn incrementScore(val) {
+        this.score = this.score + val
+    }
+}
+
+let player = Player("Alice", 100)
+player.incrementScore(50)
+print(player.score) // 150</code></pre>
+        </section>
+
+        <!-- Section: JIT Compiler -->
+        <section id="jit">
+            <h2>Native JIT Compiler</h2>
+            <p>Uranium features an independent, multi-architecture Native JIT compiler designed from scratch with no external assembler libraries. When a bytecode function gets hot (32 invocations), the JIT compiles it into raw machine instructions.</p>
+            
+            <h3>Supported Architectures</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Platform</th>
+                        <th>Architecture</th>
+                        <th>Backend Module</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Windows</td>
+                        <td>x86, x64, ARM32, ARM64</td>
+                        <td>native_jit_x64, native_jit_arm64, etc.</td>
+                    </tr>
+                    <tr>
+                        <td>Linux</td>
+                        <td>x86, x64, ARM32, ARM64</td>
+                        <td>native_jit_x64, native_jit_arm64, etc.</td>
+                    </tr>
+                    <tr>
+                        <td>macOS</td>
+                        <td>Intel x64, Apple Silicon ARM64</td>
+                        <td>native_jit_x64, native_jit_arm64</td>
+                    </tr>
+                </tbody>
+            </tbody>
+            </table>
+
+            <h3>Hardened Security Management</h3>
+            <p>For macOS Apple Silicon, Uranium utilizes specialized JIT protection page switches to strictly comply with W^X security policies:</p>
+            <pre><code>// macOS Apple Silicon mapping and toggling
+flags |= MAP_JIT;
+pthread_jit_write_protect_np(0); // Write mode
+// ... write bytes ...
+pthread_jit_write_protect_np(1); // Execute mode
+__builtin___clear_cache(start, end); // Clear instruction cache</code></pre>
+        </section>
+
+        <!-- Section: Garbage Collector -->
+        <section id="gc">
+            <h2>Tri-color Incremental Garbage Collector</h2>
+            <p>To eliminate stop-the-world latency spikes, Uranium utilizes a Generational Tri-color Incremental Garbage Collector. The garbage collection passes are interleaved directly into the VM execution budget loop.</p>
+            
+            <h3>Color Status Definitions</h3>
+            <ul>
+                <li><strong>White (Unvisited)</strong>: Objects that are candidates for collection.</li>
+                <li><strong>Grey (Discovered)</strong>: Objects that are visited, but their children/dependencies are yet to be scanned.</li>
+                <li><strong>Black (Preserved)</strong>: Verified live objects that will not be swept in the current step.</li>
+            </ul>
+
+            <h3>Execution Stepping</h3>
+            <pre><code>// Inside VM execution loop (vm.cpp)
+int instructionBudget = 512;
+while (instructionBudget-- > 0) {
+    uraniumHeap().collectGarbageStep(2); // Runs small GC incremental step
+    // ... run bytecode ...
+}</code></pre>
+        </section>
+
+        <!-- Section: UCPAPI -->
+        <section id="ucpapi">
+            <h2>UCPAPI & System Input</h2>
+            <p>The FFI module (UCPAPI) allows dynamic loading of native dynamic libraries, while standard system functions provide Console Input capabilities.</p>
+            
+            <h3>Console Input</h3>
+            <p>Read lines from the standard input stream (stdin) using the built-in <code>input()</code> function:</p>
+            <pre><code>// Read username with a prompt message
+let name = input("Enter your name: ")
+print("Hello, " + name)</code></pre>
+
+            <h3>UCPAPI Example Usage</h3>
+            <pre><code>import ucpapi
+
+// Load dll
+let lib = ucpapi.load("C:/path/to/library.dll")
+
+// Invoke function
+let result = lib.call("my_c_function", 10, 20)</code></pre>
+        </section>
+
+        <!-- Section: std.collections -->
+        <section id="std-collections">
+            <h2>std.collections</h2>
+            <p>Standard library collections provide optimized data structures in <code>urlib/std/collections.ur</code>.</p>
+            <pre><code>import std as std
+
+// 1. Set
+let activeUsers = std.Set()
+activeUsers.add("user1")
+
+// 2. Queue
+let taskQueue = std.Queue()
+taskQueue.enqueue("task1")
+
+// 3. Stack
+let actionStack = std.Stack()
+actionStack.push("action1")
+
+// 4. BigInt
+let bigVal = std.BigInt("9999999999999999999999")</code></pre>
+        </section>
+
+        <!-- Section: Native GUI API -->
+        <section id="native-gui">
+            <h2>Native GUI API</h2>
+            <p>Uranium provides native GUI rendering functions backed by direct Win32 and system windowing APIs.</p>
+            <pre><code>// Create window
+let winId = guiCreateWindow("My Window", 600, 600)
+guiCenterWindow(winId)
+
+// Add components
+let lbl = guiAddLabel(winId, "Status: OK", 20, 20, 150, 30)
+let btn = guiAddButton(winId, "Click Me", 20, 60, 100, 40)
+
+guiShowWindow(winId)</code></pre>
+        </section>
+
+    </div>
+
+    <!-- Active Navigation Link Highlight Logic -->
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            const observer = new IntersectionObserver(entries => {
+                entries.forEach(entry => {
+                    const id = entry.target.getAttribute('id');
+                    if (entry.intersectionRatio > 0) {
+                        document.querySelector(`.nav-links a[href="#${id}"]`).classList.add('active');
+                    } else {
+                        document.querySelector(`.nav-links a[href="#${id}"]`).classList.remove('active');
+                    }
+                });
+            });
+
+            document.querySelectorAll('section').forEach(section => {
+                observer.observe(section);
+            });
+        });
+    </script>
+</body>
+</html>
