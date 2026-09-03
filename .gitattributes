@@ -1,0 +1,6 @@
+# Uranium Source Files: syntax highlight nicely, do not show up as UrWeb
+*.ur linguist-language=Rust linguist-detectable=false
+
+# Third-party Vendored Libraries: ignore from language statistics
+src/sqlite3.c linguist-vendored
+src/sqlite3.h linguist-vendored
