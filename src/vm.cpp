@@ -28,6 +28,7 @@ VM vm;
 #include "thread_native.h"
 #include "type_system.h"
 #include "ucpapi_native.h"
+#include "microcode_native.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -3306,6 +3307,19 @@ void VM::registerStandardLibrary() {
     defineNative("ucpapiRun", 3, nativeUcpRun);
     defineNative("ucpapiCreateType", 3, nativeUcpCreateType);
 
+    // Microcode (ESP32 / Arduino / Hardware) Native bindings
+    defineNative("microcodeListPorts", 0, nativeMicrocodeListPorts);
+    defineNative("microcodeOpen", -1, nativeMicrocodeOpen);
+    defineNative("microcodeClose", 1, nativeMicrocodeClose);
+    defineNative("microcodeWrite", 2, nativeMicrocodeWrite);
+    defineNative("microcodeRead", -1, nativeMicrocodeRead);
+    defineNative("microcodeReadLine", -1, nativeMicrocodeReadLine);
+    defineNative("microcodeSetDTR", 2, nativeMicrocodeSetDTR);
+    defineNative("microcodeSetRTS", 2, nativeMicrocodeSetRTS);
+    defineNative("microcodeResetEsp32", 1, nativeMicrocodeResetEsp32);
+    defineNative("microcodeExecute", -1, nativeMicrocodeExecute);
+    defineNative("microcodeCompileAndFlash", -1, nativeMicrocodeCompileAndFlash);
+
     defineNumberConstant("PI", 3.14159265358979323846);
     defineNumberConstant("TAU", 6.28318530717958647692);
     defineNumberConstant("E", 2.71828182845904523536);
@@ -5751,7 +5765,20 @@ InterpretResult VM::runTaskSlice() {
                         break;
                     }
 
-                    return runtimeError("Operands to '+' must both be numbers, integers, or strings.");
+                    if (a.isArray() && b.isArray()) {
+                        ArrayPtr newArr = uraniumHeap().allocateArray();
+                        newArr->elements.reserve(a.asArray()->elements.size() + b.asArray()->elements.size());
+                        for (const auto& elem : a.asArray()->elements) {
+                            newArr->elements.push_back(elem);
+                        }
+                        for (const auto& elem : b.asArray()->elements) {
+                            newArr->elements.push_back(elem);
+                        }
+                        push(Value::arrayValue(newArr));
+                        break;
+                    }
+
+                    return runtimeError("Operands to '+' must both be numbers, integers, strings, or arrays.");
                 }
                 case OP_SUBTRACT:
                     NUMERIC_BINARY_OP(-, "Operands to '-' must be numbers.");

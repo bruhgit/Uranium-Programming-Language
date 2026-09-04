@@ -42,6 +42,7 @@ set(SOURCES
     src/db_native.cpp
     src/thread_native.cpp
     src/ucpapi_native.cpp
+    src/microcode_native.cpp
     src/stdlib_extensions.cpp
     src/sqlite3.c
 )
@@ -57,6 +58,9 @@ target_link_libraries(uranium PRIVATE Threads::Threads)
 
 if(WIN32)
     target_link_libraries(uranium PRIVATE Ole32 Shell32 Comdlg32 Comctl32 Winhttp Ws2_32 Advapi32)
+    if(MINGW)
+        target_link_options(uranium PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
 endif()
 
 if(APPLE)

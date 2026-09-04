@@ -3,6 +3,7 @@ build/
 bin/
 out/
 target/
+compiled/
 *.obj
 *.o
 *.pdb

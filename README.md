@@ -169,6 +169,7 @@ The standard library provides out-of-the-box native modules:
 | **Networking** | Raw TCP sockets (`netTcpListen`, `netTcpAccept`, `netTcpSend`, `netTcpReceive`), HTTP client/server |
 | **Cryptography** | Native SHA-256 hashing, Base64 encoding/decoding |
 | **Database** | Integrated embedded SQLite3 engine with query builder and parameterized statements |
+| **Embedded & IoT** | Microcontroller C++ transpiler & flasher (`microcode`) for ESP32 & Arduino with automated Arduino CLI bridge |
 | **Graphics & Engine** | Native GUI framework bindings and official **Godot Engine** GDExtension bridge |
 | **Concurrency** | Cooperative async/await scheduler, worker threads, synchronization primitives |
 | **Mathematics & Science**| Linear algebra, geometry, statistics, unit conversions, physics, finance |
