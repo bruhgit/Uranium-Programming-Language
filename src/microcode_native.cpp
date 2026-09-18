@@ -514,7 +514,8 @@ Value nativeMicrocodeExecute(int argCount, const Value* args, std::string* error
     DWORD written = 0;
     WriteFile(it->second, cmd.data(), static_cast<DWORD>(cmd.size()), &written, NULL);
 #else
-    write(it->second, cmd.data(), cmd.size());
+    ssize_t bytesWritten = write(it->second, cmd.data(), cmd.size());
+    (void)bytesWritten;
 #endif
 
     std::string output;

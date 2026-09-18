@@ -183,6 +183,11 @@ bool applyExecutableIcon(const std::filesystem::path& executablePath,
                                     std::to_string(GetLastError()) + ".");
     }
     return true;
+#else
+    (void)executablePath;
+    (void)iconPath;
+    (void)errorMessage;
+    return true;
 #endif
 }
 

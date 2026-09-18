@@ -6,6 +6,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 #include <algorithm>
 #include <cctype>
@@ -554,6 +559,12 @@ bool resolveImportPath(const std::string& spec,
     #ifdef _WIN32
     wchar_t path[MAX_PATH];
     if (GetModuleFileNameW(NULL, path, MAX_PATH) > 0) {
+        exeDir = std::filesystem::path(path).parent_path();
+    }
+    #elif defined(__APPLE__)
+    char path[1024];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) == 0) {
         exeDir = std::filesystem::path(path).parent_path();
     }
     #else
