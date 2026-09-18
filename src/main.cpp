@@ -1508,7 +1508,7 @@ int main(int argc, const char* argv[]) {
         return runLspServer(executablePath);
     }
 
-    if (argument == "--make" || argument == "--umake") {
+    if (argument == "--make" || argument == "--umake" || argument == "--omake") {
         std::string targetName;
         if (argc >= 3) {
             targetName = argv[2];
@@ -1516,9 +1516,9 @@ int main(int argc, const char* argv[]) {
         return runUMakeTarget({}, targetName, executablePath);
     }
 
-    if (argument == "--make-file") {
+    if (argument == "--make-file" || argument == "--omake-file") {
         if (argc < 3) {
-            std::cerr << "Usage: uranium --make-file <path> [target]\n";
+            std::cerr << "Usage: uranium --omake-file <path> [target]\n";
             return 64;
         }
 
@@ -1529,7 +1529,7 @@ int main(int argc, const char* argv[]) {
         return runUMakeTarget(argv[2], targetName, executablePath);
     }
 
-    if (argument == "--make-list") {
+    if (argument == "--make-list" || argument == "--omake-list") {
         std::filesystem::path target;
         if (argc >= 3) {
             target = argv[2];

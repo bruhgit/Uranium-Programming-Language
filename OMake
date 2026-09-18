@@ -1,0 +1,17 @@
+# Uranium Project Build File (OMake / UMake)
+NAME = UraniumIDE
+VERSION = 1.0.0
+COMPILER = .\uranium.exe
+
+default: build
+
+build:
+    @echo [OMake] Running build target...
+    ${COMPILER} tests/test_microcode.ur
+
+test:
+    @echo [OMake] Running Uranium tests...
+    ${COMPILER} --test
+
+clean:
+    @echo [OMake] Clean complete.

@@ -83,6 +83,8 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(uranium PRIVATE OpenSSL::Crypto)
         target_compile_definitions(uranium PRIVATE URANIUM_HAS_OPENSSL)
     endif()
+
+    target_link_libraries(uranium PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 if(URANIUM_DEBUG_TRACE)

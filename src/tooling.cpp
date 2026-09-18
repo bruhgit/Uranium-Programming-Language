@@ -18,6 +18,10 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace {
 
@@ -2350,6 +2354,10 @@ static std::string buildInitializeResponse(const std::string& id) {
 
 int runLspServer(const std::filesystem::path& executablePath) {
     (void) executablePath;
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     std::unordered_map<std::string, LspDocumentRecord> documents;
     bool shutdownRequested = false;
 

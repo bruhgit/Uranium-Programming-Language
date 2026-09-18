@@ -4,6 +4,8 @@ bin/
 out/
 target/
 compiled/
+dist/
+/uranium.exe
 *.obj
 *.o
 *.pdb

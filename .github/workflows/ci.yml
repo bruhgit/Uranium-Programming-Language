@@ -1,0 +1,138 @@
+name: Uranium CI & Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            artifact_name: uranium-windows-x64
+            is_windows: true
+
+          - name: Ubuntu Linux x64
+            os: ubuntu-latest
+            artifact_name: uranium-linux-x64
+            is_windows: false
+
+          - name: macOS x64
+            os: macos-latest
+            artifact_name: uranium-macos-x64
+            is_windows: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libssl-dev ninja-build
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Uranium
+        run: cmake --build build --config Release --parallel
+
+      - name: Run Smoke Test (Windows)
+        if: matrix.is_windows
+        shell: pwsh
+        run: |
+          $binPath = "build/uranium.exe"
+          if (-not (Test-Path $binPath)) {
+            $binPath = "build/Release/uranium.exe"
+          }
+          Write-Host "Running binary: $binPath --version"
+          & $binPath --version
+          Write-Host "Running smoke test: tests/comprehensive_test.ur"
+          & $binPath tests/comprehensive_test.ur
+
+      - name: Run Smoke Test (Unix)
+        if: "!matrix.is_windows"
+        run: |
+          ./build/uranium --version
+          ./build/uranium tests/comprehensive_test.ur
+
+      - name: Prepare Windows Package
+        if: matrix.is_windows
+        shell: pwsh
+        run: |
+          $binPath = "build/uranium.exe"
+          if (-not (Test-Path $binPath)) {
+            $binPath = "build/Release/uranium.exe"
+          }
+          New-Item -ItemType Directory -Force -Path "dist"
+          Copy-Item $binPath -Destination "dist/uranium.exe"
+          if (Test-Path "urlib") {
+            Copy-Item "urlib" -Destination "dist/urlib" -Recurse
+          }
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.artifact_name }}.zip"
+
+      - name: Prepare Unix Package
+        if: "!matrix.is_windows"
+        run: |
+          mkdir -p dist
+          cp build/uranium dist/uranium
+          if [ -d "urlib" ]; then
+            cp -r urlib dist/
+          fi
+          tar -czvf "${{ matrix.artifact_name }}.tar.gz" -C dist .
+
+      - name: Upload Build Artifact (Windows)
+        if: matrix.is_windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+          if-no-files-found: error
+
+      - name: Upload Build Artifact (Unix)
+        if: "!matrix.is_windows"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish Release Assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Flatten release assets
+        run: |
+          mkdir -p final-assets
+          find release-assets -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} final-assets/ \;
+          ls -lh final-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: final-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

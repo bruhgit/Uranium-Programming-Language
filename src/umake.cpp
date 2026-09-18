@@ -99,7 +99,7 @@ std::vector<std::string> splitWhitespace(const std::string& value) {
 }
 
 std::filesystem::path findInDirectory(const std::filesystem::path& directory) {
-    static const char* kNames[] = { "UMake", "UMakefile", "umake" };
+    static const char* kNames[] = { "OMake", "OMakefile", "omake", "UMake", "UMakefile", "umake" };
     for (const char* name : kNames) {
         std::filesystem::path candidate = directory / name;
         if (fileExists(candidate)) {
@@ -169,7 +169,7 @@ bool isIdentifierLike(const std::string& value) {
     bool firstOk =
         (first >= 'A' && first <= 'Z') ||
         (first >= 'a' && first <= 'z') ||
-        first == '_';
+        first == '_' || first == '.';
     if (!firstOk) {
         return false;
     }
@@ -179,7 +179,7 @@ bool isIdentifierLike(const std::string& value) {
             (current >= 'A' && current <= 'Z') ||
             (current >= 'a' && current <= 'z') ||
             (current >= '0' && current <= '9') ||
-            current == '_';
+            current == '_' || current == '-' || current == '.';
         if (!ok) {
             return false;
         }
