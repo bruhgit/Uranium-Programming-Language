@@ -2692,6 +2692,14 @@ bool getPropertyValue(const Value& receiver, const std::string& property,
                     uraniumHeap().allocateBoundMethod(receiver, method));
                 return true;
             }
+
+            for (ClassPtr curr = instance->klass; curr != nullptr; curr = curr->superclass) {
+                auto kfield = curr->fields.find(property);
+                if (kfield != curr->fields.end()) {
+                    *result = kfield->second;
+                    return true;
+                }
+            }
         }
 
         *result = Value::nilValue();

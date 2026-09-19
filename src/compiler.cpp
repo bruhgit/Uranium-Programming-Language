@@ -3,6 +3,7 @@
 #include "lexer.h"
 #include "optimizer.h"
 #include "type_system.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -629,7 +630,7 @@ static bool tokenImmediatelyFollowedByColon(const Token& token) {
         cursor++;
     }
 
-    return *cursor == ':';
+    return *cursor == ':' && *(cursor + 1) != ':';
 }
 
 static std::vector<std::string> parseOptionalGenericParameterList() {
@@ -1445,7 +1446,7 @@ static std::shared_ptr<Pattern> parsePattern() {
             return pattern;
         }
 
-        if (match(TOKEN_DOT)) {
+        if (match(TOKEN_DOT) || match(TOKEN_COLON_COLON)) {
             pattern->kind = PATTERN_PATH;
             pattern->name = name;
             do {
@@ -1453,7 +1454,7 @@ static std::shared_ptr<Pattern> parsePattern() {
                     consume(TOKEN_IDENTIFIER, "Expect member name in pattern path.");
                 pattern->name += ".";
                 pattern->name += tokenLexeme(member);
-            } while (match(TOKEN_DOT));
+            } while (match(TOKEN_DOT) || match(TOKEN_COLON_COLON));
             return pattern;
         }
 
@@ -1849,10 +1850,11 @@ static void call(bool canAssign) {
             continue;
         }
 
-        if (match(TOKEN_DOT)) {
+        bool isScopeResolution = match(TOKEN_COLON_COLON);
+        if (match(TOKEN_DOT) || isScopeResolution) {
             std::string receiverType = lastEmittedType;
             Token propertyName =
-                consume(TOKEN_IDENTIFIER, "Expect property name after '.'.");
+                consume(TOKEN_IDENTIFIER, isScopeResolution ? "Expect member name after '::'." : "Expect property name after '.'.");
             int property = identifierConstant(propertyName);
 
             if (canAssign && match(TOKEN_EQUAL)) {
@@ -2564,14 +2566,15 @@ static void classDeclaration() {
 
     parseOptionalGenericParameterList();
 
-    consume(TOKEN_LEFT_PAREN, "Expect '(' after class name.");
     Token superclassName = parser.current;
     bool hasSuperclass = false;
-    if (!check(TOKEN_RIGHT_PAREN)) {
-        superclassName = consume(TOKEN_IDENTIFIER, "Expect superclass name.");
-        hasSuperclass = superclassName.type == TOKEN_IDENTIFIER;
+    if (match(TOKEN_LEFT_PAREN)) {
+        if (!check(TOKEN_RIGHT_PAREN)) {
+            superclassName = consume(TOKEN_IDENTIFIER, "Expect superclass name.");
+            hasSuperclass = superclassName.type == TOKEN_IDENTIFIER;
+        }
+        consume(TOKEN_RIGHT_PAREN, "Expect ')' after class parameters.");
     }
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after class parameters.");
 
     std::vector<std::string> implementedContracts;
     if (match(TOKEN_IMPLEMENTS)) {
@@ -2606,6 +2609,7 @@ static void classDeclaration() {
     if (hasSuperclass) {
         namedVariable(superclassName, false);
         emitByte(OP_INHERIT);
+        registerTypeSubtype(tokenLexeme(className), tokenLexeme(superclassName));
     }
 
     ClassCompiler classCompiler;
@@ -2656,14 +2660,10 @@ static void classDeclaration() {
             Token fieldName = consume(TOKEN_IDENTIFIER, "Expect field name.");
             consume(TOKEN_EQUAL, "Expect '=' after field name.");
             
-            if (isStatic) {
-                namedVariable(className, false);
-                expression();
-                emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(fieldName));
-                emitByte(OP_POP);
-            } else {
-                expression();
-            }
+            namedVariable(className, false);
+            expression();
+            emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(fieldName));
+            emitByte(OP_POP);
             optionalSemicolon();
         }
     }
@@ -2697,6 +2697,7 @@ static void classDeclaration() {
                 continue;
             }
 
+            bool contractOk = true;
             for (const ContractMethod& requiredMethod : contract->methods) {
                 bool foundName = false;
                 bool foundExact = false;
@@ -2717,6 +2718,7 @@ static void classDeclaration() {
                 }
 
                 if (!foundExact) {
+                    contractOk = false;
                     std::string contractTypeStr = (contract->isTrait ? "trait" : "interface");
                     if (foundName) {
                         if (definedArity != requiredMethod.arity) {
@@ -2740,6 +2742,39 @@ static void classDeclaration() {
                     }
                 }
             }
+
+            if (contractOk) {
+                registerTypeSubtype(tokenLexeme(className), contractName);
+            }
+        }
+    }
+
+    // Structural conformance checking:
+    // If this class satisfies all methods of any other declared contract/interface,
+    // register it as a subtype as well.
+    for (const ContractDeclaration& contract : declaredContracts) {
+        if (std::find(implementedContracts.begin(), implementedContracts.end(), contract.name) != implementedContracts.end()) {
+            continue;
+        }
+        if (contract.methods.empty()) continue;
+        bool satisfiesAll = true;
+        for (const ContractMethod& requiredMethod : contract.methods) {
+            bool found = false;
+            for (const ContractMethod& definedMethod : definedMethods) {
+                if (definedMethod.name == requiredMethod.name &&
+                    definedMethod.arity == requiredMethod.arity &&
+                    definedMethod.isAsync == requiredMethod.isAsync) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                satisfiesAll = false;
+                break;
+            }
+        }
+        if (satisfiesAll) {
+            registerTypeSubtype(tokenLexeme(className), contract.name);
         }
     }
 }
@@ -3591,6 +3626,7 @@ bool compile(const char* source, FunctionPtr* function, const std::string& filen
     currentLoop = nullptr;
     currentTry = nullptr;
     declaredContracts.clear();
+    clearTypeSubtypes();
     declaredFunctions.clear();
     ownedSyntheticLexemes.clear();
     lastResolvedCallable = nullptr;
@@ -3736,11 +3772,18 @@ static void namespaceDeclaration() {
             FunctionPtr methodFunction = function(methodName, TYPE_METHOD, isAsync);
             emitConstantIndex(OP_SET_PROPERTY, OP_SET_PROPERTY_LONG, identifierConstant(methodName));
             emitByte(OP_POP);
+        } else if (match(TOKEN_CLASS)) {
+            classDeclaration();
         } else if (match(TOKEN_STRUCT)) {
             structDeclaration();
+        } else if (match(TOKEN_NAMESPACE)) {
+            namespaceDeclaration();
         } else {
             bool hasLet = match(TOKEN_LET) || match(TOKEN_CONST);
             Token varName = consume(TOKEN_IDENTIFIER, "Expect variable name.");
+            if (match(TOKEN_COLON)) {
+                captureTypeAnnotation({TOKEN_EQUAL});
+            }
             consume(TOKEN_EQUAL, "Expect '=' after variable name.");
             
             namedVariable(namespaceName, false);

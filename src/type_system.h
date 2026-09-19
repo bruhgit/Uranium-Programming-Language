@@ -24,5 +24,7 @@ std::string propertyAccessResultType(const std::string& receiverType,
                                      const std::string& property);
 std::string runtimeTypeName(const Value& value);
 bool valueMatchesTypeAnnotation(const Value& value, const std::string& expected);
+void registerTypeSubtype(const std::string& subType, const std::string& superType);
+void clearTypeSubtypes();
 
 #endif

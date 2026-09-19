@@ -215,6 +215,7 @@ static TokenType identifierType() {
                     case 'i': return checkKeyword(2, 5, "nally", TOKEN_FINALLY);
                     case 'n': return checkKeyword(2, 0, "", TOKEN_FN);
                     case 'o': return checkKeyword(2, 1, "r", TOKEN_FOR);
+                    case 'u': return checkKeyword(2, 2, "nc", TOKEN_FN);
                 }
             }
             break;
@@ -482,7 +483,7 @@ Token scanToken() {
         case '[': return makeToken(TOKEN_LEFT_BRACKET);
         case ']': return makeToken(TOKEN_RIGHT_BRACKET);
         case ',': return makeToken(TOKEN_COMMA);
-        case ':': return makeToken(TOKEN_COLON);
+        case ':': return makeToken(matchChar(':') ? TOKEN_COLON_COLON : TOKEN_COLON);
         case '.': return makeToken(TOKEN_DOT);
         case '?': return makeToken(TOKEN_QUESTION);
         case ';': return makeToken(TOKEN_SEMICOLON);
@@ -545,6 +546,7 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_EQUAL_EQUAL: return "EQUAL_EQUAL";
         case TOKEN_GREATER_EQUAL: return "GREATER_EQUAL";
         case TOKEN_LESS_EQUAL: return "LESS_EQUAL";
+        case TOKEN_COLON_COLON: return "COLON_COLON";
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
         case TOKEN_STRING: return "STRING";
         case TOKEN_FSTRING_START: return "FSTRING_START";

@@ -28,3 +28,5 @@ cmake_install.cmake
 Thumbs.db
 Desktop.ini
 .DS_Store
+build_sketch_esp32/
+expanded_debug.ur

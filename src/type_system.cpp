@@ -16,6 +16,8 @@ namespace {
 struct TypeExpr {
     std::string name;
     std::vector<TypeExpr> args;
+    bool isNullable = false;
+    std::vector<TypeExpr> unionVariants;
 };
 
 bool isIdentifierCharacter(char ch) {
@@ -33,7 +35,9 @@ std::string trimSpaces(const std::string& text) {
     return result;
 }
 
-bool parseTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out) {
+bool parseTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out);
+
+bool parseSingleTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out) {
     if (cursor == nullptr || out == nullptr || *cursor >= text.size()) {
         return false;
     }
@@ -49,6 +53,8 @@ bool parseTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out) 
 
     out->name = text.substr(start, *cursor - start);
     out->args.clear();
+    out->unionVariants.clear();
+    out->isNullable = false;
 
     if (*cursor < text.size() && text[*cursor] == '<') {
         (*cursor)++;
@@ -71,6 +77,43 @@ bool parseTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out) 
         (*cursor)++;
     }
 
+    if (*cursor < text.size() && text[*cursor] == '?') {
+        out->isNullable = true;
+        (*cursor)++;
+    }
+
+    return true;
+}
+
+bool parseTypeExpr(const std::string& text, std::size_t* cursor, TypeExpr* out) {
+    if (cursor == nullptr || out == nullptr || *cursor >= text.size()) {
+        return false;
+    }
+
+    TypeExpr first;
+    if (!parseSingleTypeExpr(text, cursor, &first)) {
+        return false;
+    }
+
+    if (*cursor < text.size() && text[*cursor] == '|') {
+        out->name.clear();
+        out->args.clear();
+        out->isNullable = false;
+        out->unionVariants.clear();
+        out->unionVariants.push_back(std::move(first));
+
+        while (*cursor < text.size() && text[*cursor] == '|') {
+            (*cursor)++;
+            TypeExpr next;
+            if (!parseSingleTypeExpr(text, cursor, &next)) {
+                return false;
+            }
+            out->unionVariants.push_back(std::move(next));
+        }
+        return true;
+    }
+
+    *out = std::move(first);
     return true;
 }
 
@@ -97,6 +140,16 @@ bool isGenericParameter(const std::vector<std::string>& generics, const std::str
 }
 
 std::string stringifyTypeExpr(const TypeExpr& expr) {
+    if (!expr.unionVariants.empty()) {
+        std::string result;
+        for (std::size_t i = 0; i < expr.unionVariants.size(); ++i) {
+            if (i > 0) result += "|";
+            result += stringifyTypeExpr(expr.unionVariants[i]);
+        }
+        if (expr.isNullable) result += "?";
+        return result;
+    }
+
     std::string result = expr.name;
     if (!expr.args.empty()) {
         result.push_back('<');
@@ -107,6 +160,9 @@ std::string stringifyTypeExpr(const TypeExpr& expr) {
             result += stringifyTypeExpr(expr.args[index]);
         }
         result.push_back('>');
+    }
+    if (expr.isNullable) {
+        result.push_back('?');
     }
     return result;
 }
@@ -236,27 +292,74 @@ bool matchesMapType(const MapPtr& map, const TypeExpr& expected) {
     return true;
 }
 
+static std::unordered_map<std::string, std::vector<std::string>> g_subtypeHierarchy;
+
+static bool isSubtypeOf(const std::string& subType, const std::string& superType) {
+    if (subType == superType) return true;
+    std::unordered_set<std::string> visited;
+    std::vector<std::string> queue;
+    queue.push_back(subType);
+    visited.insert(subType);
+    while (!queue.empty()) {
+        std::string curr = queue.back();
+        queue.pop_back();
+        auto it = g_subtypeHierarchy.find(curr);
+        if (it != g_subtypeHierarchy.end()) {
+            for (const auto& parent : it->second) {
+                if (parent == superType) return true;
+                if (visited.insert(parent).second) {
+                    queue.push_back(parent);
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool matchesTypeExpr(const Value& value, const TypeExpr& expected) {
-    if (expected.name.empty() || expected.name == "Any") {
+    if (expected.name.empty() && expected.unionVariants.empty()) {
+        return true;
+    }
+    if (expected.name == "Any") {
         return true;
     }
 
-    if (expected.name == "Nil") {
-        return value.isNil();
+    if (value.isNil()) {
+        if (expected.name == "Nil" || expected.name == "nil" || expected.isNullable) {
+            return true;
+        }
+        if (!expected.unionVariants.empty()) {
+            for (const auto& variant : expected.unionVariants) {
+                if (variant.name == "Nil" || variant.name == "nil" || variant.isNullable) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
-    if (expected.name == "Bool") {
+
+    if (!expected.unionVariants.empty()) {
+        for (const auto& variant : expected.unionVariants) {
+            if (matchesTypeExpr(value, variant)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (expected.name == "Bool" || expected.name == "bool" || expected.name == "Boolean") {
         return value.isBool();
     }
-    if (expected.name == "Number") {
+    if (expected.name == "Number" || expected.name == "number") {
         return value.isNumber() || value.isInt();
     }
-    if (expected.name == "int") {
+    if (expected.name == "int" || expected.name == "Int") {
         return value.isInt();
     }
-    if (expected.name == "float") {
+    if (expected.name == "float" || expected.name == "Float") {
         return value.isNumber();
     }
-    if (expected.name == "String") {
+    if (expected.name == "String" || expected.name == "string") {
         return value.isString();
     }
     if (expected.name == "Function") {
@@ -280,11 +383,21 @@ bool matchesTypeExpr(const Value& value, const TypeExpr& expected) {
     }
 
     if (value.isClass() && value.asClass() != nullptr) {
-        return value.asClass()->name == expected.name;
+        for (ClassPtr curr = value.asClass(); curr != nullptr; curr = curr->superclass) {
+            if (isSubtypeOf(curr->name, expected.name)) {
+                return true;
+            }
+        }
+        return false;
     }
     if (value.isInstance() && value.asInstance() != nullptr &&
         value.asInstance()->klass != nullptr) {
-        return value.asInstance()->klass->name == expected.name;
+        for (ClassPtr curr = value.asInstance()->klass; curr != nullptr; curr = curr->superclass) {
+            if (isSubtypeOf(curr->name, expected.name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     return false;
@@ -415,6 +528,113 @@ bool isConcreteTypeAnnotation(const std::string& type) {
     return !normalized.empty() && normalized != "Any";
 }
 
+static bool isPrimitiveTypeMatch(const std::string& expected, const std::string& actual) {
+    if (expected == actual) return true;
+    if ((expected == "Int" || expected == "int") && (actual == "Int" || actual == "int")) return true;
+    if ((expected == "Float" || expected == "float") && (actual == "Float" || actual == "float")) return true;
+    if ((expected == "Bool" || expected == "Boolean" || expected == "bool") && 
+        (actual == "Bool" || actual == "Boolean" || actual == "bool")) return true;
+    if ((expected == "String" || expected == "string") && (actual == "String" || actual == "string")) return true;
+    if ((expected == "Nil" || expected == "nil") && (actual == "Nil" || actual == "nil")) return true;
+    if ((expected == "Number" || expected == "number") && 
+        (actual == "int" || actual == "Int" || actual == "float" || actual == "Float" || actual == "number" || actual == "Number")) return true;
+    if ((actual == "Number" || actual == "number") && 
+        (expected == "int" || expected == "Int" || expected == "float" || expected == "Float" || expected == "number" || expected == "Number")) return true;
+    return false;
+}
+
+static bool isTypeExprCompatible(const TypeExpr& expected, const TypeExpr& actual) {
+    if (expected.name == "Any" || actual.name == "Any") {
+        return true;
+    }
+
+    // If expected is a union:
+    if (!expected.unionVariants.empty()) {
+        if (!actual.unionVariants.empty()) {
+            for (const auto& actualVariant : actual.unionVariants) {
+                if (!isTypeExprCompatible(expected, actualVariant)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (const auto& expectedVariant : expected.unionVariants) {
+            if (isTypeExprCompatible(expectedVariant, actual)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // If actual is a union: all variants of actual must be compatible with expected
+    if (!actual.unionVariants.empty()) {
+        for (const auto& actualVariant : actual.unionVariants) {
+            if (!isTypeExprCompatible(expected, actualVariant)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Nullability check:
+    if (expected.isNullable) {
+        if (actual.name == "Nil" || actual.name == "nil") {
+            return true;
+        }
+        TypeExpr nonNullExpected = expected;
+        nonNullExpected.isNullable = false;
+        TypeExpr nonNullActual = actual;
+        nonNullActual.isNullable = false;
+        return isTypeExprCompatible(nonNullExpected, nonNullActual);
+    }
+
+    // Expected is NOT nullable, but actual is Nil -> INCOMPATIBLE (Null-Safety!)
+    if ((actual.name == "Nil" || actual.name == "nil") && expected.name != "Nil" && expected.name != "nil") {
+        return false;
+    }
+
+    // Actual is nullable, but expected is NOT nullable -> INCOMPATIBLE
+    if (actual.isNullable && !expected.isNullable) {
+        return false;
+    }
+
+    if (isPrimitiveTypeMatch(expected.name, actual.name)) {
+        return true;
+    }
+
+    if (expected.name == actual.name) {
+        if (expected.args.size() != actual.args.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < expected.args.size(); ++i) {
+            if (!isTypeExprCompatible(expected.args[i], actual.args[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (expected.name == "Instance") {
+        if (actual.name == "Instance") return true;
+        if (actual.name != "Nil" && actual.name != "nil" &&
+            actual.name != "int" && actual.name != "Int" &&
+            actual.name != "float" && actual.name != "Float" &&
+            actual.name != "number" && actual.name != "Number" &&
+            actual.name != "Bool" && actual.name != "bool" && actual.name != "Boolean" &&
+            actual.name != "String" && actual.name != "string" &&
+            actual.name != "Array" && actual.name != "Map" &&
+            actual.name != "Function" && actual.name != "Task") {
+            return true;
+        }
+    }
+
+    if (isSubtypeOf(actual.name, expected.name)) {
+        return true;
+    }
+
+    return false;
+}
+
 bool areTypesCompatible(const std::string& expected, const std::string& actual) {
     std::string normalizedExpected = normalizeTypeAnnotation(expected);
     std::string normalizedActual = normalizeTypeAnnotation(actual);
@@ -427,21 +647,14 @@ bool areTypesCompatible(const std::string& expected, const std::string& actual) 
         return true;
     }
 
-    if (normalizedExpected == "Number" && (normalizedActual == "int" || normalizedActual == "float")) {
-        return true;
-    }
-    if (normalizedActual == "Number" && (normalizedExpected == "int" || normalizedExpected == "float")) {
-        return true;
-    }
-
     TypeExpr expectedExpr;
     TypeExpr actualExpr;
     if (tryParseTypeExpr(normalizedExpected, &expectedExpr) &&
         tryParseTypeExpr(normalizedActual, &actualExpr)) {
-        return stringifyTypeExpr(expectedExpr) == stringifyTypeExpr(actualExpr);
+        return isTypeExprCompatible(expectedExpr, actualExpr);
     }
 
-    return false;
+    return normalizedExpected == normalizedActual;
 }
 
 std::string applyTypeBindings(
@@ -560,3 +773,12 @@ bool valueMatchesTypeAnnotation(const Value& value, const std::string& expected)
 
     return matchesTypeExpr(value, expr);
 }
+
+void registerTypeSubtype(const std::string& subType, const std::string& superType) {
+    g_subtypeHierarchy[subType].push_back(superType);
+}
+
+void clearTypeSubtypes() {
+    g_subtypeHierarchy.clear();
+}
+
